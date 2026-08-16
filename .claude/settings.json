@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(yarn test:web)",
+      "Bash(yarn check)",
+      "Bash(yarn check:web)",
+      "Bash(yarn vitest *)",
+      "Bash(yarn workspace * test)",
+      "Bash(yarn workspace * check)",
+      "Bash(yarn workspace * vitest run *)",
+      "Bash(docker compose ps *)",
+      "Bash(docker compose logs *)",
+      "mcp__svelte__svelte-autofixer",
+      "mcp__ide__getDiagnostics"
+    ]
+  }
+}

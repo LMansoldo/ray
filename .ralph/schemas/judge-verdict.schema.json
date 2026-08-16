@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "required": ["verdict", "ranTests", "testOutputSummary", "findings"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["APPROVE", "REJECT"] },
+    "ranTests": { "type": "boolean" },
+    "testOutputSummary": { "type": "string" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["issue"],
+        "properties": {
+          "file": { "type": "string" },
+          "line": { "type": "integer" },
+          "issue": { "type": "string" }
+        }
+      }
+    },
+    "scopeExpansionJustified": { "type": ["boolean", "null"] }
+  }
+}

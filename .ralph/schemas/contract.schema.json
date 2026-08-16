@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "required": ["items", "coverageMap"],
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "why", "objective", "files", "model", "testStrategy", "dependsOn", "specs"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "why": { "type": "string" },
+          "projectRules": { "type": "array", "items": { "type": "string" } },
+          "specs": {
+            "type": "object",
+            "required": ["acceptanceCriteria"],
+            "properties": {
+              "interfaces": { "type": "array", "items": { "type": "string" } },
+              "types": { "type": "array", "items": { "type": "string" } },
+              "props": { "type": "array", "items": { "type": "string" } },
+              "signatures": { "type": "array", "items": { "type": "string" } },
+              "acceptanceCriteria": { "type": "array", "items": { "type": "string" } },
+              "notes": { "type": "string" }
+            }
+          },
+          "objective": { "type": "string" },
+          "files": { "type": "array", "items": { "type": "string" } },
+          "model": { "type": "string", "enum": ["light", "medium"] },
+          "testStrategy": { "type": "string" },
+          "dependsOn": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "coverageMap": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["requirement", "coveredBy"],
+        "properties": {
+          "requirement": { "type": "string" },
+          "coveredBy": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}
