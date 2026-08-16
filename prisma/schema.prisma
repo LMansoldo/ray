@@ -1,0 +1,354 @@
+// =====================================================================
+// Ray — schema.prisma
+// Fonte de verdade dos TIPOS DE DOMÍNIO (ADR-002).
+// O Prisma Client roda no sidecar Node (TypeScript) e é a única via de
+// acesso ao PostgreSQL. Segredos de credencial NUNCA são persistidos aqui
+// (ADR-003): apenas referências ao cofre nativo do SO.
+//
+// Convenções:
+// - IDs: cuid() (estáveis, ordenáveis o suficiente, seguros para URL).
+// - Timestamps: createdAt/updatedAt em todas as entidades mutáveis.
+// - Enums modelam vocabulários fechados que o agente e a UI compartilham.
+// =====================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =====================================================================
+// ENUMS — vocabulários fechados compartilhados por UI, núcleo e agente
+// =====================================================================
+
+/// Modo de conexão de um provedor de IA (ADR-006 / RF-401).
+enum ProviderConnectionMode {
+  API_KEY // chave de API (DeepSeek, Anthropic, Gemini, OpenAI)
+  SUBSCRIPTION // login por assinatura (ChatGPT), sem chave
+  AGGREGATOR // OpenRouter
+  COMPATIBLE_ENDPOINT // endpoint compatível com OpenAI (vLLM, LocalAI, self-hosted)
+}
+
+/// Identidade do provedor. GENERIC cobre endpoints compatíveis sem marca.
+enum ProviderKind {
+  OPENAI
+  ANTHROPIC
+  GEMINI
+  DEEPSEEK
+  OPENROUTER
+  GENERIC
+}
+
+/// Função à qual um provedor/modelo pode ser atribuído (RF-300).
+/// A resolução de credencial por "grupo de provedor" acontece por função.
+enum AiFunction {
+  TRANSCRIPTION
+  ANALYSIS
+  TRANSLATION
+}
+
+/// Motor de STT efetivamente usado numa sessão (ADR-007).
+enum SttEngine {
+  APPLE_SPEECH // macOS nativo, on-device
+  WHISPER_LOCAL // whisper.cpp embutido (Windows/Linux)
+  CLOUD // via provedor (OpenAI/Gemini)
+}
+
+/// Qual lado falou num segmento de transcrição (canais VOCÊ / OUTROS).
+enum Speaker {
+  SELF // VOCÊ (microfone do usuário)
+  OTHERS // OUTROS (áudio recebido)
+}
+
+/// Categoria de um assistente na biblioteca (RF-336).
+enum AssistantCategory {
+  GENERAL
+  MEETINGS
+  SALES
+  TRANSLATION
+  INTERVIEW
+  STUDY
+  CUSTOM
+}
+
+/// Origem de um assistente: embarcado no app vs. criado pelo usuário (RF-338).
+enum AssistantSource {
+  BUILTIN
+  USER
+}
+
+/// O que disparou uma sugestão do copiloto (RF-332/333).
+enum SuggestionTrigger {
+  AUTO // geração automática a partir da transcrição
+  ANALYZE_CONVERSATION // ação "Analisar Conversa"
+  SCREEN_CAPTURE // ação "Capturar Tela"
+  ASK_ANYTHING // prompt livre "Perguntar Algo"
+  ANALYZE_SELECTION // "Analisar Seleção" (texto selecionado)
+}
+
+/// Estado de uma sessão.
+enum SessionStatus {
+  ACTIVE
+  PAUSED
+  ENDED
+}
+
+/// Plataforma de reunião detectada/associada à sessão (informativo).
+enum MeetingPlatform {
+  ZOOM
+  GOOGLE_MEET
+  MICROSOFT_TEAMS
+  HANGOUTS
+  OTHER
+}
+
+// =====================================================================
+// USUÁRIO E CONFIGURAÇÕES
+// =====================================================================
+
+/// Perfil local do usuário. O app é single-user local por padrão, mas o
+/// modelo mantém User para ancorar preferências e permitir evolução futura.
+model User {
+  id        String   @id @default(cuid())
+  // Nome de exibição opcional; o app não exige conta.
+  displayName String?
+  // Idioma da UI (i18n) e idioma-alvo de tradução preferido.
+  uiLanguage      String @default("pt")
+  targetLanguage  String @default("en")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  settings     Settings?
+  apiKeyRefs   ApiKeyRef[]
+  assistants   Assistant[]
+  sessions     Session[]
+}
+
+/// Configurações do app (atalhos, recursos, áudio). Bloco de recursos e
+/// atalhos guardado como JSON para não acoplar o schema a cada toggle
+/// individual — a forma tipada vive na camada de types/interfaces.
+model Settings {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Dispositivos de áudio escolhidos (ids do SO). Null = padrão do sistema.
+  micDeviceId       String?
+  incomingDeviceId  String?
+
+  // Toggles de recursos (RF-700) e mapa de atalhos (RF-600) como JSON.
+  // A forma canônica desses objetos é definida em types/ e validada no sidecar.
+  features   Json @default("{}")
+  shortcuts  Json @default("{}")
+
+  // Retenção de sessões em dias; null = manter indefinidamente (RNF-204).
+  retentionDays Int?
+
+  // Assistente ativo por padrão ao iniciar (RF-337).
+  activeAssistantId String?
+  activeAssistant   Assistant? @relation(fields: [activeAssistantId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// =====================================================================
+// CREDENCIAIS (BYOK) — apenas REFERÊNCIA ao cofre nativo (ADR-003)
+// =====================================================================
+
+/// Referência a uma credencial guardada no cofre nativo do SO.
+/// NUNCA contém o segredo em si — apenas metadados e um ponteiro (secretRef)
+/// que o núcleo Rust usa para recuperar o segredo do cofre.
+model ApiKeyRef {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  kind           ProviderKind
+  connectionMode ProviderConnectionMode
+  // Rótulo amigável definido pelo usuário (ex.: "OpenAI pessoal").
+  label          String
+  // Ponteiro opaco para o item no cofre nativo (NÃO é o segredo).
+  secretRef      String
+  // Base URL para COMPATIBLE_ENDPOINT (ex.: http://localhost:8000/v1). Null nos demais.
+  baseUrl        String?
+  // Última validação bem-sucedida (RF-403). Null = nunca validada.
+  lastValidatedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Atribuições desta credencial a funções (transcrição/análise/tradução).
+  assignments ProviderAssignment[]
+
+  @@unique([userId, kind, label])
+  @@index([userId])
+}
+
+/// Atribui um provedor+modelo a uma função de IA (RF-404).
+/// A unicidade por (user, function) reflete "um provedor ativo por função".
+model ProviderAssignment {
+  id       String     @id @default(cuid())
+  function AiFunction
+  // Modelo escolhido no provedor (ex.: "gpt-4o", "claude-sonnet-5"). Null = padrão do provedor.
+  model    String?
+
+  apiKeyRefId String
+  apiKeyRef   ApiKeyRef @relation(fields: [apiKeyRefId], references: [id], onDelete: Cascade)
+
+  // Denormaliza o userId para permitir a restrição de unicidade por função.
+  userId String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, function])
+  @@index([apiKeyRefId])
+}
+
+// =====================================================================
+// ASSISTENTES (agente LangGraph.js) — RF-336..339
+// =====================================================================
+
+/// Um assistente é um prompt + categoria que dirige o agente LangGraph.
+/// BUILTIN são embarcados; USER são criados em runtime pelo usuário.
+model Assistant {
+  id       String            @id @default(cuid())
+  // BUILTIN pode não ter dono (userId null); USER sempre tem.
+  userId   String?
+  user     User?             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name     String
+  category AssistantCategory
+  source   AssistantSource   @default(USER)
+  // O prompt de sistema que define a capacidade do assistente.
+  prompt   String
+  // Ícone/emoji opcional para a biblioteca.
+  icon     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sessions        Session[]
+  activeInSettings Settings[]
+
+  @@index([userId])
+  @@index([category])
+}
+
+// =====================================================================
+// SESSÕES E CONTEÚDO — RF-800
+// =====================================================================
+
+/// Uma sessão de uso (uma reunião/entrevista/apresentação).
+model Session {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  status   SessionStatus   @default(ACTIVE)
+  platform MeetingPlatform @default(OTHER)
+
+  // Idiomas em uso na sessão.
+  sourceLanguage String?
+  targetLanguage String?
+
+  // Motor de STT efetivamente usado (ADR-007), para diagnóstico e métricas.
+  sttEngine SttEngine?
+
+  // Assistente ativo no momento da sessão.
+  assistantId String?
+  assistant   Assistant? @relation(fields: [assistantId], references: [id], onDelete: SetNull)
+
+  startedAt DateTime  @default(now())
+  endedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  transcripts  TranscriptSegment[]
+  suggestions  Suggestion[]
+  summary      Summary?
+  metrics      PerformanceMetric?
+
+  @@index([userId])
+  @@index([status])
+}
+
+/// Um segmento de transcrição, atribuído a um falante e com timestamps.
+/// A tradução do segmento fica inline (translatedText) por ser 1:1 e sempre
+/// consultada junto — evita um join no caminho quente de exibição.
+model TranscriptSegment {
+  id        String  @id @default(cuid())
+  sessionId String
+  session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  speaker Speaker
+  // Texto original transcrito.
+  text    String
+  // Tradução para o idioma-alvo (RF-303). Null se não traduzido.
+  translatedText String?
+
+  // Offsets em milissegundos a partir do início da sessão.
+  startMs Int
+  endMs   Int
+
+  createdAt DateTime @default(now())
+
+  @@index([sessionId, startMs])
+}
+
+/// Uma sugestão gerada pelo copiloto (o card de insight, RF-331).
+model Suggestion {
+  id        String  @id @default(cuid())
+  sessionId String
+  session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  trigger SuggestionTrigger
+
+  // Campos do card canônico (RF-331): contexto, "ELES DISSERAM", "DIGA ISSO".
+  contextLabel String? // ex.: "Você está em uma entrevista técnica"
+  theySaid     String? // a fala/pergunta do outro falante que motivou a sugestão
+  sayThis      String // a resposta sugerida (conteúdo principal)
+
+  // Rastreabilidade: qual provedor/modelo produziu a sugestão.
+  providerKind ProviderKind?
+  model        String?
+
+  createdAt DateTime @default(now())
+
+  @@index([sessionId, createdAt])
+}
+
+/// Resumo da sessão (RF-803). 1:1 com Session.
+model Summary {
+  id        String  @id @default(cuid())
+  sessionId String  @unique
+  session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  // Texto do resumo e itens de ação (lista de strings) como JSON.
+  text        String
+  actionItems Json @default("[]")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Métricas agregadas por sessão (RF-801). 1:1 com Session.
+model PerformanceMetric {
+  id        String  @id @default(cuid())
+  sessionId String  @unique
+  session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  // Tempo de fala do usuário em segundos.
+  speakingTimeSec Int @default(0)
+  // Contagens simples derivadas da sessão.
+  questionsAnswered Int @default(0)
+  objectionsHandled Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
