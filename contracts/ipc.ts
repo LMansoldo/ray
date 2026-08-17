@@ -1,12 +1,12 @@
 // =====================================================================
-// Ray — Contrato de fronteira IPC (núcleo Rust  <->  sidecar Node)
+// Ray — Contrato de fronteira IPC (núcleo Rust <-> sidecar Node)
 // =====================================================================
 //
-// STATUS: ESPECIFICAÇÃO. Este arquivo é a definição LEGÍVEL do contrato.
-// A FONTE DE VERDADE em runtime é o Rust + ts-rs (ADR-010): os structs Rust
-// anotados com #[derive(TS)] geram os tipos TS equivalentes a estes. Estes
-// tipos devem ser mantidos em espelho com os structs Rust; divergência entre
-// os dois é um bug de contrato.
+// STATUS: GERADO (ADR-010). Fonte de verdade em runtime: os structs Rust
+// anotados com `#[derive(TS)]` em core/src/ipc.rs. Para regenerar este
+// arquivo, ver o comando em core/src/ipc.rs (comentário de topo) ou em
+// contracts/README.md. NÃO editar as declarações geradas abaixo à mão —
+// exceto os dois blocos explicitamente marcados como "mantido à mão".
 //
 // Transporte: HTTP em loopback (127.0.0.1), porta efêmera por sessão (ADR-005).
 // Streaming (tokens do copiloto) via SSE/chunked. O Rust é o ÚNICO cliente.
@@ -22,229 +22,141 @@
 // =====================================================================
 
 // ---------------------------------------------------------------------
-// Espelho dos enums de domínio usados na fronteira.
-// (Em runtime, importar de @prisma/client; reproduzidos como union types
-//  aqui apenas para tornar a especificação auto-contida e legível.)
+// BEGIN mantido à mão — `IpcResult<T>` é um envelope genérico com tag
+// booleana (`ok: true | false`); `ts-rs`/`serde` não têm uma representação
+// de enum interno-tagueado por booleano, então este tipo não é derivável de
+// um struct Rust e continua escrito aqui à mão.
 // ---------------------------------------------------------------------
-export type ProviderKind =
-  | "OPENAI" | "ANTHROPIC" | "GEMINI" | "DEEPSEEK" | "OPENROUTER" | "GENERIC";
-
-export type ProviderConnectionMode =
-  | "API_KEY" | "SUBSCRIPTION" | "AGGREGATOR" | "COMPATIBLE_ENDPOINT";
-
-export type AiFunction = "TRANSCRIPTION" | "ANALYSIS" | "TRANSLATION";
-
-export type SuggestionTrigger =
-  | "AUTO" | "ANALYZE_CONVERSATION" | "SCREEN_CAPTURE"
-  | "ASK_ANYTHING" | "ANALYZE_SELECTION";
-
-export type Speaker = "SELF" | "OTHERS";
-
-// ---------------------------------------------------------------------
-// Envelope comum de resposta. Todo endpoint não-streaming responde Result<T>.
-// ---------------------------------------------------------------------
-export type IpcError = {
-  /** Código estável para o Rust ramificar decisões (não é mensagem de UI). */
-  code:
-    | "INVALID_CREDENTIAL"
-    | "PROVIDER_UNAVAILABLE"
-    | "RATE_LIMITED"
-    | "BAD_REQUEST"
-    | "DB_ERROR"
-    | "AGENT_ERROR"
-    | "INTERNAL";
-  /** Mensagem legível para diagnóstico. NUNCA inclui segredos. */
-  message: string;
-  /** Se aplicável, sugere se o Rust deve tentar de novo. */
-  retryable?: boolean;
-};
-
 export type IpcResult<T> =
   | { ok: true; value: T }
   | { ok: false; error: IpcError };
+// END mantido à mão
+// ---------------------------------------------------------------------
 
 // ---------------------------------------------------------------------
-// Credencial injetada pelo Rust por requisição (ADR-003).
-// O sidecar usa em memória e NÃO persiste. Presente apenas nas chamadas
-// que precisam falar com um provedor.
+// BEGIN gerado por ts-rs a partir de core/src/ipc.rs — não editar à mão.
+// Ordem alfabética: decisão do próprio `ts-rs`, não editorial.
 // ---------------------------------------------------------------------
-export type InjectedCredential = {
-  kind: ProviderKind;
-  connectionMode: ProviderConnectionMode;
-  /** O segredo em si (chave/token). Efêmero. Nunca logar. */
-  secret: string;
-  /** Base URL para COMPATIBLE_ENDPOINT; ausente nos demais modos. */
-  baseUrl?: string;
-  /** Modelo a usar; ausente = padrão do provedor. */
-  model?: string;
-};
-
-// =====================================================================
-// 1. CICLO DE VIDA / SAÚDE
-// =====================================================================
-
-/** GET /health — o Rust confirma que o sidecar subiu e está pronto. */
-export type HealthResponse = {
-  status: "ok";
-  /** Versão do sidecar, para checagem de compatibilidade de contrato. */
-  version: string;
-  /** true quando Prisma conectou ao Postgres. */
-  dbReady: boolean;
-};
-
-// =====================================================================
-// 2. VALIDAÇÃO DE CREDENCIAL (RF-403)
-// =====================================================================
-
-/** POST /providers/validate — testa uma credencial antes de salvar. */
-export type ValidateCredentialRequest = {
-  credential: InjectedCredential;
-};
-
-export type ValidateCredentialResponse = {
-  valid: boolean;
-  /** Modelos disponíveis descobertos na validação, quando o provedor expõe. */
-  availableModels?: string[];
-  /** Motivo, quando valid=false (ex.: "unauthorized"). Sem segredos. */
-  reason?: string;
-};
-
-// =====================================================================
-// 3. COPILOTO — geração de sugestão em streaming (RF-332/305)
-// =====================================================================
-
-/** Contexto de transcrição enviado ao agente para gerar uma sugestão. */
-export type TranscriptContextSegment = {
-  speaker: Speaker;
-  text: string;
-  /** Offset em ms a partir do início da sessão. */
-  startMs: number;
-};
+export type AiFunction = "TRANSCRIPTION" | "ANALYSIS" | "TRANSLATION";
 
 /**
- * POST /copilot/suggest  (resposta em STREAMING via SSE).
- * O Rust encaminha o gatilho, o assistente ativo e o contexto; o sidecar
- * roda o grafo LangGraph com a credencial injetada e devolve tokens.
+ * Resposta consolidada de POST /copilot/analyze (RF-333).
  */
-export type SuggestRequest = {
-  sessionId: string;
-  /** Id do assistente ativo (define o prompt/comportamento no grafo). */
-  assistantId: string;
-  trigger: SuggestionTrigger;
-  /** Janela de transcrição relevante (o Rust decide o tamanho). */
-  context: TranscriptContextSegment[];
-  /** Prompt livre do usuário, quando trigger = ASK_ANYTHING. */
-  userPrompt?: string;
-  /**
-   * Frames de tela em base64, quando trigger = SCREEN_CAPTURE (RF-333/706).
-   * Sequência curta amostrada, não vídeo contínuo (ADR/limite de latência).
-   */
-  screenshots?: string[];
-  /** Texto selecionado, quando trigger = ANALYZE_SELECTION (RF-335). */
-  selectionText?: string;
-  credential: InjectedCredential;
-};
+export type AnalyzeResponse = { suggestionId: string, contextLabel?: string, theySaid?: string, sayThis: string, providerKind: ProviderKind, model?: string, };
 
-/** Eventos SSE emitidos por /copilot/suggest, em ordem. */
-export type SuggestStreamEvent =
-  /** Metadados iniciais, uma vez, antes dos tokens. */
-  | { type: "start"; suggestionId: string; contextLabel?: string; theySaid?: string }
-  /** Token incremental do campo "DIGA ISSO". */
-  | { type: "token"; text: string }
-  /** Fim com sucesso: o sidecar já persistiu a Suggestion via Prisma. */
-  | { type: "done"; providerKind: ProviderKind; model?: string }
-  /** Falha no meio do streaming. */
-  | { type: "error"; error: IpcError };
+/**
+ * POST /sessions/transcript — persiste um segmento de transcrição já
+ * finalizado (com ou sem tradução).
+ */
+export type AppendTranscriptRequest = { sessionId: string, speaker: Speaker, text: string, translatedText?: string, startMs: number, endMs: number, };
 
-// =====================================================================
-// 4. ANÁLISE DE CONVERSA / TELA (RF-333) — resposta única (não streaming)
-//    Reaproveita SuggestRequest com trigger específico; retorno consolidado.
-// =====================================================================
+/**
+ * Categoria de um assistente (RF-336..339).
+ */
+export type AssistantCategory = "GENERAL" | "MEETINGS" | "SALES" | "TRANSLATION" | "INTERVIEW" | "STUDY" | "CUSTOM";
 
-export type AnalyzeResponse = {
-  suggestionId: string;
-  contextLabel?: string;
-  theySaid?: string;
-  sayThis: string;
-  providerKind: ProviderKind;
-  model?: string;
-};
+/**
+ * POST /assistants — cria um assistente (RF-336/338).
+ */
+export type CreateAssistantRequest = { userId: string, name: string, category: AssistantCategory, prompt: string, icon?: string, };
 
-// =====================================================================
-// 5. ASSISTENTES (RF-336..339) — operações de biblioteca
-// =====================================================================
+/**
+ * Retorna o id do Assistant criado (o objeto em si é tipo de domínio do
+ * Prisma, ADR-010 camada 1).
+ */
+export type CreateAssistantResponse = { assistantId: string, };
 
-export type CreateAssistantRequest = {
-  userId: string;
-  name: string;
-  category:
-    | "GENERAL" | "MEETINGS" | "SALES" | "TRANSLATION"
-    | "INTERVIEW" | "STUDY" | "CUSTOM";
-  prompt: string;
-  icon?: string;
-};
+/**
+ * POST /sessions/end.
+ */
+export type EndSessionRequest = { sessionId: string, 
+/**
+ * Se true, o sidecar dispara a geração de resumo (RF-803) usando
+ * `credential`.
+ */
+generateSummary: boolean, credential?: InjectedCredential, };
 
-/** Retorna o Assistant criado (tipo de domínio do Prisma). */
-export type CreateAssistantResponse = {
-  assistantId: string;
-};
+export type EndSessionResponse = { sessionId: string, summaryId?: string, };
 
-// =====================================================================
-// 6. SESSÕES E CONTEÚDO (RF-800) — persistência via sidecar (ADR-002)
-// =====================================================================
+/**
+ * GET /health — o Rust confirma que o sidecar subiu e está pronto.
+ */
+export type HealthResponse = { status: "ok", version: string, dbReady: boolean, };
 
-export type StartSessionRequest = {
-  userId: string;
-  assistantId?: string;
-  platform?:
-    | "ZOOM" | "GOOGLE_MEET" | "MICROSOFT_TEAMS" | "HANGOUTS" | "OTHER";
-  sourceLanguage?: string;
-  targetLanguage?: string;
-};
+/**
+ * Credencial injetada por requisição (ADR-003). Efêmera; nunca logar.
+ */
+export type InjectedCredential = { kind: ProviderKind, connectionMode: ProviderConnectionMode, secret: string, baseUrl?: string, model?: string, };
 
-export type StartSessionResponse = { sessionId: string };
+/**
+ * Envelope comum de erro IPC. Mensagem legível para diagnóstico — NUNCA
+ * inclui segredos (ADR-003).
+ */
+export type IpcError = { code: IpcErrorCode, message: string, retryable?: boolean, };
 
-/** Persiste um segmento de transcrição já finalizado (com ou sem tradução). */
-export type AppendTranscriptRequest = {
-  sessionId: string;
-  speaker: Speaker;
-  text: string;
-  translatedText?: string;
-  startMs: number;
-  endMs: number;
-};
+/**
+ * Códigos estáveis de erro IPC (para o Rust ramificar decisões; não é
+ * mensagem de UI).
+ */
+export type IpcErrorCode = "INVALID_CREDENTIAL" | "PROVIDER_UNAVAILABLE" | "RATE_LIMITED" | "BAD_REQUEST" | "DB_ERROR" | "AGENT_ERROR" | "INTERNAL";
 
-export type EndSessionRequest = {
-  sessionId: string;
-  /** Se true, o sidecar dispara a geração de resumo (RF-803) usando credencial. */
-  generateSummary: boolean;
-  credential?: InjectedCredential;
-};
+/**
+ * Plataforma de reunião detectada/selecionada para a sessão.
+ */
+export type MeetingPlatform = "ZOOM" | "GOOGLE_MEET" | "MICROSOFT_TEAMS" | "HANGOUTS" | "OTHER";
 
-export type EndSessionResponse = {
-  sessionId: string;
-  summaryId?: string;
-};
+export type ProviderConnectionMode = "API_KEY" | "SUBSCRIPTION" | "AGGREGATOR" | "COMPATIBLE_ENDPOINT";
 
-// =====================================================================
-// 7. TRADUÇÃO AO VIVO (RF-303/RF-303) — segmento a segmento
-// =====================================================================
+export type ProviderKind = "OPENAI" | "ANTHROPIC" | "GEMINI" | "DEEPSEEK" | "OPENROUTER" | "GENERIC";
 
-export type TranslateRequest = {
-  sessionId: string;
-  text: string;
-  targetLanguage: string;
-  credential: InjectedCredential;
-};
+export type Speaker = "SELF" | "OTHERS";
 
-export type TranslateResponse = {
-  translatedText: string;
-};
+/**
+ * POST /sessions/start (RF-800).
+ */
+export type StartSessionRequest = { userId: string, assistantId?: string, platform?: MeetingPlatform, sourceLanguage?: string, targetLanguage?: string, };
 
-// =====================================================================
-// Índice de endpoints (mapa nome -> request/response) para referência.
-// Endpoints de streaming marcam a resposta como `SSE<...>`.
-// =====================================================================
+export type StartSessionResponse = { sessionId: string, };
+
+/**
+ * POST /copilot/suggest (resposta em streaming via SSE) — também reutilizado
+ * por POST /copilot/analyze (resposta única consolidada).
+ */
+export type SuggestRequest = { sessionId: string, assistantId: string, trigger: SuggestionTrigger, context: Array<TranscriptContextSegment>, userPrompt?: string, screenshots?: Array<string>, selectionText?: string, credential: InjectedCredential, };
+
+/**
+ * Eventos SSE do copiloto (espelha o union type de ipc.ts).
+ */
+export type SuggestStreamEvent = { "type": "start", suggestionId: string, contextLabel?: string, theySaid?: string, } | { "type": "token", text: string, } | { "type": "done", providerKind: ProviderKind, model?: string, } | { "type": "error", error: IpcError, };
+
+export type SuggestionTrigger = "AUTO" | "ANALYZE_CONVERSATION" | "SCREEN_CAPTURE" | "ASK_ANYTHING" | "ANALYZE_SELECTION";
+
+/**
+ * Contexto de transcrição enviado ao agente para gerar uma sugestão.
+ */
+export type TranscriptContextSegment = { speaker: Speaker, text: string, startMs: number, };
+
+/**
+ * POST /translate — tradução ao vivo, segmento a segmento (RF-303).
+ */
+export type TranslateRequest = { sessionId: string, text: string, targetLanguage: string, credential: InjectedCredential, };
+
+export type TranslateResponse = { translatedText: string, };
+
+/**
+ * POST /providers/validate — testa uma credencial antes de salvar.
+ */
+export type ValidateCredentialRequest = { credential: InjectedCredential, };
+
+export type ValidateCredentialResponse = { valid: boolean, availableModels?: Array<string>, reason?: string, };
+// END gerado por ts-rs
+// ---------------------------------------------------------------------
+
+// ---------------------------------------------------------------------
+// BEGIN mantido à mão — índice de rotas puramente documental (as chaves são
+// literais de rota como "GET /health"); não é um payload serializável, então
+// não há struct Rust equivalente para `ts-rs` derivar.
+// ---------------------------------------------------------------------
 export type IpcEndpoints = {
   "GET /health": { req: void; res: HealthResponse };
   "POST /providers/validate": { req: ValidateCredentialRequest; res: IpcResult<ValidateCredentialResponse> };
@@ -256,3 +168,5 @@ export type IpcEndpoints = {
   "POST /sessions/end": { req: EndSessionRequest; res: IpcResult<EndSessionResponse> };
   "POST /translate": { req: TranslateRequest; res: IpcResult<TranslateResponse> };
 };
+// END mantido à mão
+// ---------------------------------------------------------------------

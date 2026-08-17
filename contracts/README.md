@@ -5,7 +5,17 @@ Este pacote é o **alicerce tipado** do qual as tasks de codificação derivam. 
 ## O que há aqui
 
 - **`../prisma/schema.prisma`** — fonte de verdade dos **tipos de domínio** (ADR-002). O Prisma gera os tipos TS do sidecar via `prisma generate`. Estruturalmente validado; a validação semântica completa roda com `npx prisma validate` em ambiente com acesso aos engines do Prisma.
-- **`ipc.ts`** — especificação legível dos **contratos de fronteira IPC** entre núcleo Rust e sidecar (ADR-005). Type-checka em `--strict`.
+- **`ipc.ts`** — **gerado** (T-000/ADR-010) a partir dos structs Rust `#[derive(TS)]` em `../core/src/ipc.rs`. Type-checka em `--strict`. Duas exceções continuam mantidas à mão dentro do próprio arquivo (`IpcResult<T>` e `IpcEndpoints` — motivo explicado inline): não são payloads serializáveis, então não têm struct Rust equivalente.
+
+## Como regenerar `ipc.ts`
+
+```sh
+cd core && cargo test               # ts-rs exporta os bindings (staging em core/target/)
+./core/scripts/gen-ipc-contract.sh  # funde o staging com os blocos mantidos à mão
+```
+
+Editar os structs Rust em `core/src/ipc.rs`, nunca `contracts/ipc.ts` diretamente
+(fora dos dois blocos marcados "mantido à mão").
 
 ## Regra de ouro para as tasks
 
@@ -21,7 +31,7 @@ Cada fragmento de codificação deve ser escrito **contra** um destes contratos,
 
 ## Ordem sugerida das próximas tasks
 
-1. **Fechar a fonte Rust dos tipos IPC:** criar os structs Rust espelhando `ipc.ts`, com `#[derive(TS)]`, e o comando de geração. A partir daí, `ipc.ts` passa a ser gerado, não mantido à mão.
+1. ~~**Fechar a fonte Rust dos tipos IPC:** criar os structs Rust espelhando `ipc.ts`, com `#[derive(TS)]`, e o comando de geração. A partir daí, `ipc.ts` passa a ser gerado, não mantido à mão.~~ **Feito (T-000).**
 2. **Scaffold que compila:** projeto Tauri + sidecar com stubs vazios que já satisfazem os contratos (endpoints respondem `INTERNAL`/`todo`, modelos migrados). É o "chão" para os agentes preencherem.
 3. **Fragmentar por contrato:** cada endpoint de `ipc.ts` e cada adapter de provedor (ADR-006) vira uma task isolada — "implemente X contra este contrato + estes testes".
 

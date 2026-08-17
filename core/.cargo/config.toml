@@ -1,0 +1,6 @@
+# T-000 (ADR-010): faz `cargo test` gerar os bindings ts-rs num diretório de
+# staging dentro de `target/` (já ignorado pelo git), em vez do padrão
+# `./bindings`. `core/scripts/gen-ipc-contract.sh` funde esse staging com os
+# dois blocos mantidos à mão e escreve `contracts/ipc.ts`.
+[env]
+TS_RS_EXPORT_DIR = { value = "target/ipc-ts-rs", relative = true }
