@@ -1,22 +1,31 @@
 # Scope for this ralph-loop run
 
-This run covers **only FASE 1 — Sidecar: dados e agente** from `docs/TASKS.md`:
-T-100, T-101, T-102, T-103.
+This run covers **only FASE 2 — Sidecar: adapters de provedor** from `docs/TASKS.md`:
+T-200, T-201, T-202, T-203, T-204, T-205, T-206, T-207.
 
-- **FASE 0 (T-000..T-003) is already implemented and merged into `dev`.** Do not
-  recreate it, do not generate work items for it, and treat its outputs (Prisma
-  client, `contracts/settings.ts`, the Tauri/Svelte scaffold, `contracts/ipc.ts`
-  generation) as an existing foundation you can build on.
-- **FASE 2 onward (T-2xx, T-3xx, T-4xx, T-5xx) is out of scope for this run.** Do not
+- **FASE 0 (T-000..T-003) is already implemented and merged into `dev`.** Treat its
+  outputs (Prisma client, `contracts/settings.ts`, the Tauri/Svelte scaffold,
+  `contracts/ipc.ts` generation) as an existing foundation.
+- **FASE 1 (T-100..T-103) is already implemented and merged into `dev`.** Treat its
+  outputs (`server.ts`, `handlers.ts`, `db.ts`, `agent/graph.ts`, `agent/summary.ts`,
+  `prisma/seed.ts`, and the `AiProvider` interface in `providers/provider.ts`) as
+  existing code you build on — do not recreate or regenerate any of it.
+- **FASE 3 onward (T-3xx, T-4xx, T-5xx) is out of scope for this run.** Do not
   generate work items for them.
-- T-102's "Dependências" line in TASKS.md lists "T-2xx (providers — pelo menos um
-  real)" alongside T-101. That line describes what a *fully working end-to-end*
-  suggestion needs, not this item's own acceptance criteria — T-102's own "Pronto
-  quando" only requires "teste com um provider fake". Since no T-2xx item exists in
-  this run's graph, resolve T-102 using only its `AiProvider`-agnostic contract and a
-  fake/mocked provider in tests; do not add a `dependsOn` edge to a nonexistent T-2xx
-  item, and do not block T-102 on a real provider adapter existing.
-- Produce exactly 4 items (or a justified split of one of them per the sizing rule in
-  the Contract-phase instructions), one per T-100/T-101/T-102/T-103, with `dependsOn`
-  edges only among items in this run's own graph (T-100..T-103) — never pointing at a
-  Fase 0 or Fase 2+ task id that this run does not generate.
+
+## Item guidance
+
+- T-200..T-205 are the six provider adapters. Each implements the `AiProvider`
+  interface from `sidecar/src/providers/provider.ts` unchanged and registers itself
+  in `sidecar/src/providers/registry.ts`. They are independent of each other —
+  `dependsOn` edges among them are not needed unless one genuinely requires another
+  to exist first (they don't).
+- T-206 (`validateCredential` handler) and T-207 (`translate` handler) both depend
+  on at least T-200 being present (so a real adapter exists to delegate to).
+- Do not add `dependsOn` edges pointing at Fase 0 or Fase 1 task ids — those items
+  do not exist in this run's graph. Reference their outputs as already-present code.
+- Produce exactly 8 items (one per T-200..T-207), or a justified split of one of
+  them per the sizing rule in the Contract-phase instructions.
+- Tests for adapters must mock the HTTP layer (no real API calls) but assert on the
+  actual request shape sent (auth header, endpoint, streaming parse) — per
+  `.claude/rules/sidecar.md`.
