@@ -12,10 +12,23 @@ MAX_ATTEMPTS_PER_ITEM="5"
 PER_CALL_BUDGET_USD="2"
 TOTAL_BUDGET_USD="20"
 SETUP_CMD="cd sidecar && npm install"
-MODEL_LIGHT="haiku"
-MODEL_MEDIUM="sonnet"
+MODEL_LIGHT="mimo-v2.5-pro"
+MODEL_MEDIUM="mimo-v2.5-pro"
 MODEL_STRONG="opus"
 FULL_SUITE_CMD="cd core && cargo check && cd ../sidecar && npm run typecheck && npm test && cd .. && npx prisma validate"
+
+# CLI binary invoked per model tier. Defaults to the standard `claude` CLI
+# (Anthropic auth). A tier can instead point at a wrapper script that exports its
+# own ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN/ANTHROPIC_MODEL to run that tier's
+# calls against a different backend — e.g. `claude-mimo.sh`, which points Claude
+# Code at a Xiaomi MiMo-compatible endpoint. This works because every call below
+# is spawned as its own subprocess: distinct env vars per tier never collide,
+# unlike trying to run two differently-configured `claude` invocations inside the
+# same interactive session. light/medium here run the RED/GREEN worker stages on
+# mimo-v2.5-pro; judges (always MODEL_STRONG/CLAUDE_BIN_STRONG) stay on real opus.
+CLAUDE_BIN_LIGHT="$HOME/claude-mimo.sh"
+CLAUDE_BIN_MEDIUM="$HOME/claude-mimo.sh"
+CLAUDE_BIN_STRONG="claude"
 
 RALPH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_REPO="$(cd "$RALPH_DIR/.." && pwd)"
@@ -70,11 +83,11 @@ write_progress() {
 }
 
 call_claude_structured() {
-  local prompt_file="$1" model="$2" schema_file="$3" allowed_tools="$4" out="$5"
+  local prompt_file="$1" model="$2" schema_file="$3" allowed_tools="$4" out="$5" bin="${6:-claude}"
   local prompt; prompt="$(cat "$prompt_file")"
   local tools_args=()
   [ -n "$allowed_tools" ] && tools_args=(--allowedTools "$allowed_tools")
-  claude -p "$prompt" --model "$model" --output-format json \
+  "$bin" -p "$prompt" --model "$model" --output-format json \
     --json-schema "$(cat "$schema_file")" \
     --dangerously-skip-permissions --max-budget-usd "$PER_CALL_BUDGET_USD" \
     "${tools_args[@]+"${tools_args[@]}"}" > "$out"
@@ -82,9 +95,9 @@ call_claude_structured() {
 }
 
 call_claude_free() {
-  local prompt_file="$1" model="$2" out="$3"
+  local prompt_file="$1" model="$2" out="$3" bin="${4:-claude}"
   local prompt; prompt="$(cat "$prompt_file")"
-  claude -p "$prompt" --model "$model" --output-format json \
+  "$bin" -p "$prompt" --model "$model" --output-format json \
     --dangerously-skip-permissions --max-budget-usd "$PER_CALL_BUDGET_USD" \
     > "$out"
   record_cost "$(basename "$prompt_file")" "$(jq '.total_cost_usd' "$out")"
@@ -176,7 +189,7 @@ if [ ! -f "$STATE_DIR/contract.json" ]; then
   sed "s|{{SPECS_DIR}}|$SPECS_DIR|g" "$PROMPTS/contract-prompt.md" > "$CONTRACT_PROMPT"
 
   CONTRACT_RAW="$STATE_DIR/contract-raw.json"
-  call_claude_structured "$CONTRACT_PROMPT" "$MODEL_STRONG" "$SCHEMAS/contract.schema.json" "" "$CONTRACT_RAW"
+  call_claude_structured "$CONTRACT_PROMPT" "$MODEL_STRONG" "$SCHEMAS/contract.schema.json" "" "$CONTRACT_RAW" "$CLAUDE_BIN_STRONG"
   jq '.structured_output' "$CONTRACT_RAW" > "$STATE_DIR/contract.json"
 
   node "$SCRIPTS/validate-coverage.mjs" "$STATE_DIR/contract.json" "$STATE_DIR/CONTRACT-FAILED.md" \
@@ -232,7 +245,13 @@ for ITEM_ID in "${ORDER[@]:-}"; do
   ITEM_JSON="$STATE_DIR/item-$ITEM_ID.json"
   jq --arg id "$ITEM_ID" '.items[] | select(.id == $id)' "$STATE_DIR/contract.json" > "$ITEM_JSON"
   ITEM_MODEL_TIER="$(jq -r '.model' "$ITEM_JSON")"
-  if [ "$ITEM_MODEL_TIER" = "light" ]; then ITEM_MODEL="$MODEL_LIGHT"; else ITEM_MODEL="$MODEL_MEDIUM"; fi
+  if [ "$ITEM_MODEL_TIER" = "light" ]; then
+    ITEM_MODEL="$MODEL_LIGHT"
+    ITEM_BIN="$CLAUDE_BIN_LIGHT"
+  else
+    ITEM_MODEL="$MODEL_MEDIUM"
+    ITEM_BIN="$CLAUDE_BIN_MEDIUM"
+  fi
 
   DEPS=()
   while IFS= read -r line; do
@@ -266,12 +285,12 @@ for ITEM_ID in "${ORDER[@]:-}"; do
     if [ "$RED_STAGE" = true ]; then
       RED_PROMPT="$STATE_DIR/rendered-$ITEM_ID-$ATTEMPT-red.md"
       node "$SCRIPTS/render-prompt.mjs" "$PROMPTS/worker-red-prompt.md" "$ITEM_JSON" "$EXTRA_VALUES" > "$RED_PROMPT"
-      call_claude_free "$RED_PROMPT" "$ITEM_MODEL" "$STATE_DIR/out-$ITEM_ID-$ATTEMPT-red.json"
+      call_claude_free "$RED_PROMPT" "$ITEM_MODEL" "$STATE_DIR/out-$ITEM_ID-$ATTEMPT-red.json" "$ITEM_BIN"
 
       JUDGE_B_PROMPT="$STATE_DIR/rendered-$ITEM_ID-$ATTEMPT-judgeB.md"
       node "$SCRIPTS/render-prompt.mjs" "$PROMPTS/judge-review-tests-prompt.md" "$ITEM_JSON" "$EXTRA_VALUES" > "$JUDGE_B_PROMPT"
       JUDGE_B_OUT="$STATE_DIR/out-$ITEM_ID-$ATTEMPT-judgeB.json"
-      call_claude_structured "$JUDGE_B_PROMPT" "$MODEL_STRONG" "$SCHEMAS/judge-verdict.schema.json" "Read,Grep,Glob,Bash" "$JUDGE_B_OUT"
+      call_claude_structured "$JUDGE_B_PROMPT" "$MODEL_STRONG" "$SCHEMAS/judge-verdict.schema.json" "Read,Grep,Glob,Bash" "$JUDGE_B_OUT" "$CLAUDE_BIN_STRONG"
       VERDICT_B="$(jq -r '.structured_output.verdict' "$JUDGE_B_OUT")"
 
       if [ "$VERDICT_B" = "REJECT" ]; then
@@ -284,12 +303,12 @@ for ITEM_ID in "${ORDER[@]:-}"; do
 
     GREEN_PROMPT="$STATE_DIR/rendered-$ITEM_ID-$ATTEMPT-green.md"
     node "$SCRIPTS/render-prompt.mjs" "$PROMPTS/worker-green-prompt.md" "$ITEM_JSON" "$EXTRA_VALUES" > "$GREEN_PROMPT"
-    call_claude_free "$GREEN_PROMPT" "$ITEM_MODEL" "$STATE_DIR/out-$ITEM_ID-$ATTEMPT-green.json"
+    call_claude_free "$GREEN_PROMPT" "$ITEM_MODEL" "$STATE_DIR/out-$ITEM_ID-$ATTEMPT-green.json" "$ITEM_BIN"
 
     JUDGE_D_PROMPT="$STATE_DIR/rendered-$ITEM_ID-$ATTEMPT-judgeD.md"
     node "$SCRIPTS/render-prompt.mjs" "$PROMPTS/judge-final-review-prompt.md" "$ITEM_JSON" "$EXTRA_VALUES" > "$JUDGE_D_PROMPT"
     JUDGE_D_OUT="$STATE_DIR/out-$ITEM_ID-$ATTEMPT-judgeD.json"
-    call_claude_structured "$JUDGE_D_PROMPT" "$MODEL_STRONG" "$SCHEMAS/judge-verdict.schema.json" "Read,Grep,Glob,Bash" "$JUDGE_D_OUT"
+    call_claude_structured "$JUDGE_D_PROMPT" "$MODEL_STRONG" "$SCHEMAS/judge-verdict.schema.json" "Read,Grep,Glob,Bash" "$JUDGE_D_OUT" "$CLAUDE_BIN_STRONG"
     VERDICT_D="$(jq -r '.structured_output.verdict' "$JUDGE_D_OUT")"
 
     if [ "$VERDICT_D" = "REJECT" ]; then
