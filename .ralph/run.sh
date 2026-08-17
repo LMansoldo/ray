@@ -6,8 +6,8 @@ set -euo pipefail
 # list (e.g. "/path/one.md" "/path/two.md"), so this array always has >=1 element
 # (never empty — safe to expand under set -u even on bash 3.2, which chokes on
 # expanding a genuinely EMPTY array, not a populated one).
-SPEC_PATHS=("/Users/lucasmansoldo/Projects/ray/docs/TASKS.md" "/Users/lucasmansoldo/Projects/ray/docs/docs/SRS-Ray.md" "/Users/lucasmansoldo/Projects/ray/docs/docs/ADR-Ray.md" "/Users/lucasmansoldo/Projects/ray/docs/README.md")
-BRANCH_NAME="ralph/fase-0-fundacao"
+SPEC_PATHS=("/Users/lucasmansoldo/Projects/ray/docs/TASKS.md" "/Users/lucasmansoldo/Projects/ray/docs/docs/SRS-Ray.md" "/Users/lucasmansoldo/Projects/ray/docs/docs/ADR-Ray.md" "/Users/lucasmansoldo/Projects/ray/docs/README.md" "/Users/lucasmansoldo/Projects/ray/.ralph/SCOPE.md")
+BRANCH_NAME="ralph/fase-1-sidecar-agente"
 MAX_ATTEMPTS_PER_ITEM="5"
 PER_CALL_BUDGET_USD="2"
 TOTAL_BUDGET_USD="20"

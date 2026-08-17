@@ -1,10 +1,13 @@
 # Ralph Loop run
 
 This `.ralph/` folder was scaffolded by the `ralph-loop` skill for:
-`/Users/lucasmansoldo/Projects/ray/docs/TASKS.md /Users/lucasmansoldo/Projects/ray/docs/docs/SRS-Ray.md /Users/lucasmansoldo/Projects/ray/docs/docs/ADR-Ray.md /Users/lucasmansoldo/Projects/ray/docs/README.md`.
+`/Users/lucasmansoldo/Projects/ray/docs/TASKS.md /Users/lucasmansoldo/Projects/ray/docs/docs/SRS-Ray.md /Users/lucasmansoldo/Projects/ray/docs/docs/ADR-Ray.md /Users/lucasmansoldo/Projects/ray/docs/README.md /Users/lucasmansoldo/Projects/ray/.ralph/SCOPE.md`.
 
-Scope for this run: **FASE 0 — Fundação** (T-000 a T-003) do backlog em TASKS.md. As
-demais fases (1–6) ficam para runs seguintes.
+Scope for this run: **FASE 1 — Sidecar: dados e agente** (T-100 a T-103) do backlog em
+TASKS.md. FASE 0 (T-000..T-003) já está implementada e mergeada em `dev` — este run
+não a recria. FASE 2 em diante fica para runs seguintes; `.ralph/SCOPE.md` (incluído
+nos specs acima) documenta como o item T-102 deve tratar sua dependência declarada em
+T-2xx (providers), que fica fora do escopo deste run.
 
 ## Run it
 
@@ -15,7 +18,7 @@ bash .ralph/run.sh
 This runs **unattended** with `--dangerously-skip-permissions`. It will:
 - Refuse to run if the current branch is `main`/`master`, or the working tree is
   dirty.
-- Create a dedicated git worktree on branch `ralph/fase-0-fundacao` — all work
+- Create a dedicated git worktree on branch `ralph/fase-1-sidecar-agente` — all work
   (including every commit) happens there, never in this checkout.
 - Spend up to $2 per model call and $20 total before aborting.
 - Cap each work item at 5 attempts before marking it `BLOCKED` and moving on to
