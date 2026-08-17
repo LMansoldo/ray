@@ -40,25 +40,52 @@ export async function validateCredential(
 
 // --- Copiloto (streaming) --------------------------------------------
 
+import { runSuggestStream, runAnalyze } from "./agent/graph.js";
+
+async function loadAssistant(assistantId: string) {
+  const assistant = await prisma.assistant.findUnique({
+    where: { id: assistantId },
+  });
+  if (!assistant) {
+    throw new Error(`Assistant not found: ${assistantId}`);
+  }
+  return assistant;
+}
+
 /**
- * Gera eventos SSE do copiloto. Stub: emite start + done sem tokens.
- * TASK: carregar o assistente (Prisma), rodar o grafo LangGraph com o
- * provedor resolvido e emitir 'token' conforme o streaming do provedor.
+ * Gera eventos SSE do copiloto: start → token* → done.
+ * Carrega o assistente via Prisma, resolve o provedor via registry, delega ao
+ * grafo LangGraph (provider-agnostic). Emite erro se o assistente não existir.
  */
 export async function* suggestStream(
   req: SuggestRequest,
 ): AsyncIterable<SuggestStreamEvent> {
-  const suggestionId = "stub-suggestion";
-  yield { type: "start", suggestionId };
-  // TASK: emitir eventos { type: "token", text } aqui.
-  yield { type: "done", providerKind: req.credential.kind, model: req.credential.model };
+  try {
+    const assistant = await loadAssistant(req.assistantId);
+    const provider = getProvider(req.credential.kind);
+    yield* runSuggestStream(req, assistant.prompt, provider);
+  } catch (err) {
+    yield {
+      type: "error",
+      error: { code: "AGENT_ERROR", message: (err as Error).message },
+    };
+  }
 }
 
+/**
+ * Versão não-streaming: consolida todos os tokens em um AnalyzeResponse.
+ */
 export async function analyze(
   req: SuggestRequest,
 ): Promise<IpcResult<AnalyzeResponse>> {
-  // TASK: versão não-streaming; consolidar a resposta e persistir Suggestion.
-  return ipcErr("INTERNAL", "not_implemented");
+  try {
+    const assistant = await loadAssistant(req.assistantId);
+    const provider = getProvider(req.credential.kind);
+    const value = await runAnalyze(req, assistant.prompt, provider);
+    return { ok: true, value };
+  } catch (err) {
+    return ipcErr("AGENT_ERROR", (err as Error).message);
+  }
 }
 
 // --- Assistentes ------------------------------------------------------
