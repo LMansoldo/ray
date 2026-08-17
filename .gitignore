@@ -11,6 +11,9 @@ build/
 /apps/*/src-tauri/target/
 # ts-rs default export path when not yet wired to contracts/ipc.ts (ADR-010, T-000)
 /bindings/
+/core/bindings/
+# tauri_build::build() capability-schema output (core/build.rs)
+/core/gen/
 
 # Prisma
 prisma/*.db

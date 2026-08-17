@@ -15,14 +15,18 @@ use ipc::{SuggestRequest, SuggestStreamEvent};
 // injeta na chamada ao sidecar e devolve à UI. TASK: preencher cada corpo.
 
 /// Alterna o modo stealth de uma janela (ADR-008).
+// Not `pub`: a `pub fn` at crate root annotated `#[tauri::command]` collides
+// with the macro's own `#[macro_export]`'d `__cmd__*` helper (also crate-root),
+// causing E0255. The UI-facing contract is the string name registered in
+// `generate_handler!` below, not Rust visibility, so this is not a break.
 #[tauri::command]
-pub fn set_stealth(window_label: String, excluded: bool) {
+fn set_stealth(window_label: String, excluded: bool) {
     windows::set_capture_excluded(&window_label, excluded);
 }
 
 /// Alterna a visibilidade da janela inteira ("panic hide", RF-504).
 #[tauri::command]
-pub fn toggle_window(window_label: String) {
+fn toggle_window(window_label: String) {
     windows::toggle_visibility(&window_label);
 }
 
@@ -30,7 +34,7 @@ pub fn toggle_window(window_label: String) {
 /// streaming a partir do sidecar, reemitindo eventos para a UI.
 /// TASK: implementar a ponte SSE(sidecar) -> evento Tauri(UI).
 #[tauri::command]
-pub fn suggest(_req: SuggestRequest) -> Result<(), String> {
+fn suggest(_req: SuggestRequest) -> Result<(), String> {
     // Placeholder: a implementação emitirá SuggestStreamEvent à UI.
     let _ = SuggestStreamEvent::Token { text: String::new() };
     Err("not_implemented".into())
