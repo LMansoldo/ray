@@ -13,6 +13,14 @@
 
 generator client {
   provider = "prisma-client-js"
+  // schema.prisma vive na raiz do repo (ADR-002/infra.md), mas o Prisma
+  // Client só é consumido pelo sidecar, que tem seu próprio node_modules
+  // (não é um workspace). Sem `output`, o `prisma generate` resolve o
+  // pacote a partir do diretório do schema e escreve no node_modules da
+  // raiz, onde o sidecar nunca o encontraria. Apontar o output para o
+  // node_modules do sidecar mantém o sidecar como único consumidor do
+  // client (T-002) sem duplicar a dependência na raiz.
+  output = "../sidecar/node_modules/.prisma/client"
 }
 
 datasource db {

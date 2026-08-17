@@ -6,7 +6,10 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "prisma:validate": "cd .. && prisma validate",
+    "prisma:generate": "cd .. && prisma generate",
+    "prisma:migrate": "cd .. && prisma migrate dev"
   },
   "dependencies": {
     "@langchain/langgraph": "^1.4.9",

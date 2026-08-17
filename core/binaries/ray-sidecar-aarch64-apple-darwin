@@ -1,0 +1,15 @@
+#!/bin/sh
+# Placeholder inerte para o binário do sidecar (ADR-001/005).
+#
+# `tauri-build` (invocado por `core/build.rs`) valida, já em `cargo check`,
+# que todo caminho listado em `bundle.externalBin` do tauri.conf.json existe
+# para o target triple do host — por isso este arquivo precisa existir aqui,
+# mesmo antes do sidecar real ser empacotado como binário autocontido via
+# `pkg` (T-501 cuida do empacotamento real por plataforma; T-300 cuida de
+# `sidecar::Sidecar::start` de fato spawnar/supervisionar o processo).
+#
+# Este script NÃO é o sidecar real: não hospeda o agente LangGraph.js nem o
+# Prisma Client, e não deve ser invocado por nenhum código de produção antes
+# de T-300/T-501 substituírem este arquivo pelo binário real.
+echo "ray-sidecar placeholder: not implemented (see T-300, T-501)" >&2
+exit 1
