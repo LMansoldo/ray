@@ -18,9 +18,10 @@ As tasks estão agrupadas em fases por dependência. Dentro de uma fase, as task
 
 ---
 
-## FASE 0 — Fundação (bloqueia quase tudo; fazer primeiro, em série)
+## FASE 0 — Fundação (bloqueia quase tudo; fazer primeiro, em série) — CONCLUÍDA (T-000..T-003)
 
 ### T-000 · Ligar a geração de tipos ts-rs → contracts/ipc.ts
+**Status:** Concluído — commit `57ea6ae` (merge `fbac5c7` em `dev`).
 **Objetivo:** Tornar `core/src/ipc.rs` a fonte de verdade real, gerando `contracts/ipc.ts` em vez de mantê-lo à mão (ADR-010).
 **Toca:** `core/src/ipc.rs`, `core/Cargo.toml`, `contracts/ipc.ts` (passa a ser gerado), script de build.
 **Contrato:** Os tipos gerados devem bater 1:1 com o `contracts/ipc.ts` atual (que é o espelho de referência). Divergência de nome/shape é regressão.
@@ -28,6 +29,7 @@ As tasks estão agrupadas em fases por dependência. Dentro de uma fase, as task
 **Pronto quando:** `cargo test` exporta os bindings; o diff entre o `ipc.ts` gerado e o espelho de referência é só de formatação; documentado o comando de regeneração no README.
 
 ### T-001 · Setup do projeto Tauri 2 + scaffold da UI Svelte 5
+**Status:** Concluído — commit `d53ecc5` (merge `fbac5c7` em `dev`).
 **Objetivo:** Criar o app Tauri 2 real cabeando `core/` como o crate do núcleo, e inicializar `apps/ui` como projeto Svelte 5 + Vite + TypeScript.
 **Toca:** `core/` (tauri.conf.json, build.rs, main.rs), `apps/ui/` (projeto Svelte novo), configuração de `externalBin` para o sidecar.
 **Contrato:** `core/src/lib.rs` já define `run()` e os comandos; manter. A UI deve usar Svelte 5 com runes.
@@ -35,6 +37,7 @@ As tasks estão agrupadas em fases por dependência. Dentro de uma fase, as task
 **Pronto quando:** `cargo check` no core passa no host; `npm run build` na UI passa; o app abre uma janela em dev.
 
 ### T-002 · Migração inicial do Prisma + Prisma Client no sidecar
+**Status:** Concluído — commit `30418a0` (merge `fbac5c7` em `dev`).
 **Objetivo:** Gerar o cliente Prisma e a primeira migração a partir de `prisma/schema.prisma`; expor uma instância de client reutilizável no sidecar.
 **Toca:** `prisma/`, `sidecar/src/db.ts` (novo), `sidecar/package.json` (scripts de migração).
 **Contrato:** Não alterar `schema.prisma` sem sinalizar. O client é singleton no processo do sidecar.
@@ -42,6 +45,7 @@ As tasks estão agrupadas em fases por dependência. Dentro de uma fase, as task
 **Pronto quando:** `npx prisma validate` passa; `npx prisma migrate dev` cria a migração; `import { prisma } from "./db.js"` disponível e tipado.
 
 ### T-003 · Fonte de verdade única para features/shortcuts (tipos dos JSON)
+**Status:** Concluído — commit `59de7c1` (merge `fbac5c7` em `dev`).
 **Objetivo:** Definir os tipos canônicos dos campos `Settings.features` e `Settings.shortcuts` (hoje `Json` no schema), num módulo compartilhado, com validação em runtime.
 **Toca:** `contracts/settings.ts` (novo), `sidecar/src/settings.ts` (validação).
 **Contrato:** Os toggles de recursos (RF-700) e o conjunto de atalhos com defaults (RF-604) do SRS. Os nomes dos atalhos devem casar com os comandos que a UI e o core registram.
