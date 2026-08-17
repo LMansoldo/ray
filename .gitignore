@@ -9,6 +9,8 @@ build/
 # Rust / Tauri
 /core/target/
 /apps/*/src-tauri/target/
+# ts-rs default export path when not yet wired to contracts/ipc.ts (ADR-010, T-000)
+/bindings/
 
 # Prisma
 prisma/*.db
