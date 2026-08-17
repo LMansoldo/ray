@@ -41,6 +41,7 @@ export async function validateCredential(
 // --- Copiloto (streaming) --------------------------------------------
 
 import { runSuggestStream, runAnalyze } from "./agent/graph.js";
+import { generateSummary } from "./agent/summary.js";
 
 async function loadAssistant(assistantId: string) {
   const assistant = await prisma.assistant.findUnique({
@@ -165,6 +166,29 @@ export async function endSession(
   req: EndSessionRequest,
 ): Promise<IpcResult<EndSessionResponse>> {
   try {
+    let summaryId: string | undefined;
+
+    if (req.generateSummary && req.credential) {
+      const segments = await prisma.transcriptSegment.findMany({
+        where: { sessionId: req.sessionId },
+      });
+      const provider = getProvider(req.credential.kind);
+      const summaryResult = await generateSummary(
+        segments,
+        req.credential,
+        provider,
+      );
+
+      const summary = await prisma.summary.create({
+        data: {
+          sessionId: req.sessionId,
+          text: summaryResult.text,
+          actionItems: summaryResult.actionItems,
+        },
+      });
+      summaryId = summary.id;
+    }
+
     const session = await prisma.session.update({
       where: { id: req.sessionId },
       data: {
@@ -172,7 +196,8 @@ export async function endSession(
         endedAt: new Date(),
       },
     });
-    return { ok: true, value: { sessionId: session.id } };
+
+    return { ok: true, value: { sessionId: session.id, summaryId } };
   } catch (e) {
     return ipcErr("DB_ERROR", (e as Error).message);
   }

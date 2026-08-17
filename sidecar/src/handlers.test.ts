@@ -59,15 +59,26 @@ interface StoredAssistant {
   updatedAt: Date;
 }
 
+interface StoredSummary {
+  id: string;
+  sessionId: string;
+  text: string;
+  actionItems: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 let sessions: Map<string, StoredSession> = new Map();
 let segments: Map<string, StoredSegment> = new Map();
 let assistants: Map<string, StoredAssistant> = new Map();
+let summaries: Map<string, StoredSummary> = new Map();
 let idCounter = 0;
 
 function resetStore() {
   sessions = new Map();
   segments = new Map();
   assistants = new Map();
+  summaries = new Map();
   idCounter = 0;
 }
 
@@ -214,10 +225,91 @@ vi.mock("./db.js", () => {
           return assistants.size;
         }),
       },
+      summary: {
+        create: vi.fn(
+          async ({ data }: { data: Record<string, unknown> }) => {
+            const id = nextId("summary");
+            const now = new Date();
+            const summary: StoredSummary = {
+              id,
+              sessionId: data.sessionId as string,
+              text: data.text as string,
+              actionItems: JSON.stringify(data.actionItems ?? []),
+              createdAt: now,
+              updatedAt: now,
+            };
+            summaries.set(id, summary);
+            return { ...summary };
+          },
+        ),
+        findUnique: vi.fn(
+          async ({ where }: { where: { sessionId?: string; id?: string } }) => {
+            if (where.sessionId) {
+              for (const s of summaries.values()) {
+                if (s.sessionId === where.sessionId) return { ...s };
+              }
+              return null;
+            }
+            const summary = summaries.get(where.id!);
+            return summary ? { ...summary } : null;
+          },
+        ),
+      },
       $disconnect: vi.fn(async () => {}),
     },
   };
 });
+
+// ---------------------------------------------------------------------------
+// Mock: summary module — fake generateSummary for T-103
+//
+// The mock signature matches the declared generateSummary exactly:
+// (TranscriptContextSegment[], InjectedCredential, AiProvider).
+// A vi.fn captures arguments so handler-level tests can assert that
+// endSession forwards req.credential and transcript segments.
+// ---------------------------------------------------------------------------
+
+import type {
+  TranscriptContextSegment,
+  InjectedCredential,
+} from "./contract.js";
+
+const { mockGenerateSummary } = vi.hoisted(() => ({
+  mockGenerateSummary: vi.fn(
+    async (
+      _segments: TranscriptContextSegment[],
+      _credential: InjectedCredential,
+      _provider: unknown,
+    ) => {
+      // Fake summary: at least 1 action item.
+      const text = "Summary of session.";
+      const actionItems = ["Follow up on discussion"];
+      return { text, actionItems };
+    },
+  ),
+}));
+
+vi.mock("./agent/summary.js", () => {
+  return {
+    generateSummary: mockGenerateSummary,
+  };
+});
+
+// ---------------------------------------------------------------------------
+// Mock: provider registry — returns a fake provider for T-103
+// ---------------------------------------------------------------------------
+
+vi.mock("./providers/registry.js", () => ({
+  getProvider: (_kind: string) => ({
+    kind: "OPENAI",
+    capabilities: { analysis: true, transcription: false, translation: false },
+    validate: async () => ({ valid: true }),
+    analyzeStream: async function* () {
+      yield { text: "fake" };
+    },
+    async translate() { throw new Error("not supported"); },
+  }),
+}));
 
 // ---------------------------------------------------------------------------
 // Imports — handlers.ts will receive the mocked prisma from ./db.js
@@ -560,6 +652,220 @@ describe("session handlers (T-100)", () => {
         expect(result).toHaveProperty("value");
         expect(result.value).toHaveProperty("sessionId");
       }
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // endSession with generateSummary=true (T-103, RF-803)
+  // -----------------------------------------------------------------------
+
+  describe("endSession with generateSummary (T-103)", () => {
+    let sessionId: string;
+
+    const SAMPLE_CREDENTIAL: InjectedCredential = {
+      kind: "OPENAI",
+      connectionMode: "API_KEY",
+      secret: "sk-test-secret-12345",
+    };
+
+    beforeEach(async () => {
+      mockGenerateSummary.mockClear();
+
+      const result = await startSession({ userId: "user-1" });
+      if (!result.ok) throw new Error("startSession failed in beforeEach");
+      sessionId = result.value.sessionId;
+
+      // Seed transcript segments so the summary has context.
+      await appendTranscript({
+        sessionId,
+        speaker: "SELF",
+        text: "Hello, let's discuss the project.",
+        startMs: 0,
+        endMs: 3000,
+      });
+      await appendTranscript({
+        sessionId,
+        speaker: "OTHERS",
+        text: "Sure, the deployment is on track.",
+        startMs: 3500,
+        endMs: 6000,
+      });
+      await appendTranscript({
+        sessionId,
+        speaker: "SELF",
+        text: "Great, let's schedule the next review.",
+        startMs: 6500,
+        endMs: 9000,
+      });
+    });
+
+    it("generates and persists a Summary with at least 1 action item when generateSummary=true", async () => {
+      const req: EndSessionRequest = {
+        sessionId,
+        generateSummary: true,
+        credential: SAMPLE_CREDENTIAL,
+      };
+      const result: IpcResult<EndSessionResponse> = await endSession(req);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+
+      expect(result.value.sessionId).toBe(sessionId);
+      expect(result.value.summaryId).toBeTruthy();
+      expect(typeof result.value.summaryId).toBe("string");
+
+      // Verify the Summary was persisted 1:1 with the session.
+      const summaryId = result.value.summaryId!;
+      const summary = summaries.get(summaryId);
+      expect(summary).toBeDefined();
+      expect(summary!.sessionId).toBe(sessionId);
+      expect(summary!.text.length).toBeGreaterThan(0);
+
+      const actionItems = JSON.parse(summary!.actionItems);
+      expect(Array.isArray(actionItems)).toBe(true);
+      expect(actionItems.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it("returns summaryId in the response when a summary was generated", async () => {
+      const result = await endSession({
+        sessionId,
+        generateSummary: true,
+        credential: SAMPLE_CREDENTIAL,
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+
+      expect(result.value.summaryId).toBeTruthy();
+      expect(typeof result.value.summaryId).toBe("string");
+    });
+
+    it("creates exactly one Summary per session (1:1 via unique sessionId)", async () => {
+      await endSession({
+        sessionId,
+        generateSummary: true,
+        credential: SAMPLE_CREDENTIAL,
+      });
+
+      // Count summaries for this session — should be exactly 1.
+      let count = 0;
+      for (const s of summaries.values()) {
+        if (s.sessionId === sessionId) count += 1;
+      }
+      expect(count).toBe(1);
+    });
+
+    it("sets session status to ENDED and endedAt even when generating a summary", async () => {
+      await endSession({
+        sessionId,
+        generateSummary: true,
+        credential: SAMPLE_CREDENTIAL,
+      });
+
+      const session = sessions.get(sessionId);
+      expect(session).toBeDefined();
+      expect(session!.status).toBe("ENDED");
+      expect(session!.endedAt).toBeInstanceOf(Date);
+    });
+
+    it("forwards EndSessionRequest.credential to generateSummary (RF-803)", async () => {
+      const credential: InjectedCredential = {
+        kind: "ANTHROPIC",
+        connectionMode: "API_KEY",
+        secret: "sk-ant-forward-test-55555",
+        model: "claude-sonnet-5",
+      };
+
+      await endSession({
+        sessionId,
+        generateSummary: true,
+        credential,
+      });
+
+      // generateSummary was called — assert it received the exact credential.
+      expect(mockGenerateSummary).toHaveBeenCalledTimes(1);
+      const [segments, receivedCredential, receivedProvider] =
+        mockGenerateSummary.mock.calls[0]!;
+
+      expect(receivedCredential).toEqual(credential);
+      expect(receivedCredential.kind).toBe("ANTHROPIC");
+      expect(receivedCredential.secret).toBe("sk-ant-forward-test-55555");
+
+      // Also verify transcript segments were forwarded.
+      expect(Array.isArray(segments)).toBe(true);
+      expect(segments.length).toBe(3);
+    });
+
+    it("forwards transcript segments from the session to generateSummary", async () => {
+      await endSession({
+        sessionId,
+        generateSummary: true,
+        credential: SAMPLE_CREDENTIAL,
+      });
+
+      expect(mockGenerateSummary).toHaveBeenCalledTimes(1);
+      const [segments] = mockGenerateSummary.mock.calls[0]!;
+
+      // The 3 segments we seeded in beforeEach.
+      expect(segments).toHaveLength(3);
+      expect(segments[0].text).toBe("Hello, let's discuss the project.");
+      expect(segments[1].text).toBe("Sure, the deployment is on track.");
+      expect(segments[2].text).toBe("Great, let's schedule the next review.");
+    });
+
+    it("credential secret never appears in persisted Summary (ADR-003)", async () => {
+      const secret = "sk-super-secret-never-persist-99999";
+      const result = await endSession({
+        sessionId,
+        generateSummary: true,
+        credential: {
+          kind: "OPENAI",
+          connectionMode: "API_KEY",
+          secret,
+        },
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+
+      // Check the persisted summary does not contain the secret.
+      const summary = summaries.get(result.value.summaryId!);
+      expect(summary).toBeDefined();
+      expect(summary!.text).not.toContain(secret);
+      expect(summary!.actionItems).not.toContain(secret);
+    });
+
+    it("credential secret never appears in the response (ADR-003)", async () => {
+      const secret = "sk-super-secret-never-in-response-88888";
+      const result = await endSession({
+        sessionId,
+        generateSummary: true,
+        credential: {
+          kind: "OPENAI",
+          connectionMode: "API_KEY",
+          secret,
+        },
+      });
+
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(secret);
+      expect(serialized).not.toContain("sk-super-secret-never-in-response-88888");
+    });
+
+    it("does not create a Summary when generateSummary=false", async () => {
+      const countBefore = summaries.size;
+
+      const result = await endSession({
+        sessionId,
+        generateSummary: false,
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+
+      expect(result.value.summaryId).toBeUndefined();
+      expect(summaries.size).toBe(countBefore);
+      expect(mockGenerateSummary).not.toHaveBeenCalled();
     });
   });
 
