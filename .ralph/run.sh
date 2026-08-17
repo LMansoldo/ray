@@ -14,7 +14,7 @@ TOTAL_BUDGET_USD="20"
 SETUP_CMD="cd sidecar && npm install"
 MODEL_LIGHT="mimo-v2.5-pro"
 MODEL_MEDIUM="mimo-v2.5-pro"
-MODEL_STRONG="opus"
+MODEL_STRONG="deepseek-v4-pro[1m]"
 FULL_SUITE_CMD="cd core && cargo check && cd ../sidecar && npm run typecheck && npm test && cd .. && npx prisma validate"
 
 # CLI binary invoked per model tier. Defaults to the standard `claude` CLI
@@ -28,7 +28,7 @@ FULL_SUITE_CMD="cd core && cargo check && cd ../sidecar && npm run typecheck && 
 # mimo-v2.5-pro; judges (always MODEL_STRONG/CLAUDE_BIN_STRONG) stay on real opus.
 CLAUDE_BIN_LIGHT="$HOME/claude-mimo.sh"
 CLAUDE_BIN_MEDIUM="$HOME/claude-mimo.sh"
-CLAUDE_BIN_STRONG="claude"
+CLAUDE_BIN_STRONG="$HOME/claude-deepseek.sh"
 
 RALPH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_REPO="$(cd "$RALPH_DIR/.." && pwd)"

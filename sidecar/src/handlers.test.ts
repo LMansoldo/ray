@@ -1,4 +1,4 @@
-// T-100 RED: integration tests for session handlers.
+// T-100/T-101 RED: integration tests for session + assistant handlers.
 //
 // Mocks Prisma at the module level so tests execute WITHOUT a real Postgres
 // (DATABASE_URL). This makes the RED signal observable: the stub handlers
@@ -47,13 +47,27 @@ interface StoredSegment {
   createdAt: Date;
 }
 
+interface StoredAssistant {
+  id: string;
+  userId: string | null;
+  name: string;
+  category: string;
+  source: string;
+  prompt: string;
+  icon: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 let sessions: Map<string, StoredSession> = new Map();
 let segments: Map<string, StoredSegment> = new Map();
+let assistants: Map<string, StoredAssistant> = new Map();
 let idCounter = 0;
 
 function resetStore() {
   sessions = new Map();
   segments = new Map();
+  assistants = new Map();
   idCounter = 0;
 }
 
@@ -141,6 +155,65 @@ vi.mock("./db.js", () => {
           },
         ),
       },
+      assistant: {
+        create: vi.fn(
+          async ({ data }: { data: Record<string, unknown> }) => {
+            const id = nextId("assistant");
+            const now = new Date();
+            const assistant: StoredAssistant = {
+              id,
+              userId: (data.userId as string) ?? null,
+              name: data.name as string,
+              category: data.category as string,
+              source: (data.source as string) ?? "USER",
+              prompt: data.prompt as string,
+              icon: (data.icon as string) ?? null,
+              createdAt: now,
+              updatedAt: now,
+            };
+            assistants.set(id, assistant);
+            return { ...assistant };
+          },
+        ),
+        upsert: vi.fn(
+          async ({
+            where,
+            create,
+            update,
+          }: {
+            where: { name: string };
+            create: Record<string, unknown>;
+            update: Record<string, unknown>;
+          }) => {
+            const existing = Array.from(assistants.values()).find(
+              (a) => a.name === where.name,
+            );
+            if (existing) {
+              const updated = { ...existing, ...update, updatedAt: new Date() };
+              assistants.set(existing.id, updated);
+              return { ...updated };
+            }
+            const id = nextId("assistant");
+            const now = new Date();
+            const assistant: StoredAssistant = {
+              id,
+              userId: (create.userId as string) ?? null,
+              name: create.name as string,
+              category: create.category as string,
+              source: (create.source as string) ?? "USER",
+              prompt: create.prompt as string,
+              icon: (create.icon as string) ?? null,
+              createdAt: now,
+              updatedAt: now,
+            };
+            assistants.set(id, assistant);
+            return { ...assistant };
+          },
+        ),
+        count: vi.fn(async () => {
+          return assistants.size;
+        }),
+      },
       $disconnect: vi.fn(async () => {}),
     },
   };
@@ -151,11 +224,14 @@ vi.mock("./db.js", () => {
 // ---------------------------------------------------------------------------
 
 import {
+  createAssistant,
   startSession,
   appendTranscript,
   endSession,
 } from "./handlers.js";
 import type {
+  CreateAssistantRequest,
+  CreateAssistantResponse,
   StartSessionRequest,
   AppendTranscriptRequest,
   EndSessionRequest,
@@ -166,6 +242,100 @@ import type {
 
 // ---------------------------------------------------------------------------
 // Tests
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// createAssistant (T-101)
+// ---------------------------------------------------------------------------
+
+describe("createAssistant (T-101)", () => {
+  beforeEach(() => {
+    resetStore();
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns an assistantId and persists a USER assistant with given fields", async () => {
+    const req: CreateAssistantRequest = {
+      userId: "user-1",
+      name: "My Custom Assistant",
+      category: "CUSTOM",
+      prompt: "You are a helpful assistant.",
+      icon: "star",
+    };
+    const result: IpcResult<CreateAssistantResponse> = await createAssistant(req);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    expect(result.value.assistantId).toBeTruthy();
+    expect(typeof result.value.assistantId).toBe("string");
+
+    const assistant = assistants.get(result.value.assistantId);
+    expect(assistant).toBeDefined();
+    expect(assistant!.source).toBe("USER");
+    expect(assistant!.name).toBe("My Custom Assistant");
+    expect(assistant!.category).toBe("CUSTOM");
+    expect(assistant!.prompt).toBe("You are a helpful assistant.");
+    expect(assistant!.icon).toBe("star");
+    expect(assistant!.userId).toBe("user-1");
+  });
+
+  it("persists a USER assistant with null icon when icon is omitted", async () => {
+    const req: CreateAssistantRequest = {
+      userId: "user-1",
+      name: "No Icon Assistant",
+      category: "GENERAL",
+      prompt: "General purpose.",
+    };
+    const result = await createAssistant(req);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const assistant = assistants.get(result.value.assistantId);
+    expect(assistant).toBeDefined();
+    expect(assistant!.icon).toBeNull();
+    expect(assistant!.source).toBe("USER");
+  });
+
+  it("returns ok:true with the IpcResult envelope shape", async () => {
+    const req: CreateAssistantRequest = {
+      userId: "user-1",
+      name: "Envelope Test",
+      category: "MEETINGS",
+      prompt: "Meeting assistant.",
+    };
+    const result = await createAssistant(req);
+    expect(result).toHaveProperty("ok");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result).toHaveProperty("value");
+      expect(result.value).toHaveProperty("assistantId");
+    }
+  });
+
+  it("returns ok:false with BAD_REQUEST and a descriptive message when name is empty", async () => {
+    const result = await createAssistant({
+      userId: "user-1",
+      name: "",
+      category: "GENERAL",
+      prompt: "test",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    // A real validation path returns BAD_REQUEST with a descriptive message.
+    // The stub returns INTERNAL/"not_implemented" — neither matches.
+    expect(result.error.code).toBe("BAD_REQUEST");
+    expect(result.error.message).not.toBe("not_implemented");
+    expect(result.error.message.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// session handlers (T-100)
 // ---------------------------------------------------------------------------
 
 describe("session handlers (T-100)", () => {

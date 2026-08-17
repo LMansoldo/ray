@@ -66,8 +66,24 @@ export async function analyze(
 export async function createAssistant(
   req: CreateAssistantRequest,
 ): Promise<IpcResult<CreateAssistantResponse>> {
-  // TASK: prisma.assistant.create(...) e retornar o id.
-  return ipcErr("INTERNAL", "not_implemented");
+  if (!req.name || req.name.trim().length === 0) {
+    return ipcErr("BAD_REQUEST", "Assistant name must not be empty");
+  }
+  try {
+    const assistant = await prisma.assistant.create({
+      data: {
+        userId: req.userId,
+        name: req.name,
+        category: req.category,
+        source: "USER",
+        prompt: req.prompt,
+        icon: req.icon ?? null,
+      },
+    });
+    return { ok: true, value: { assistantId: assistant.id } };
+  } catch (e) {
+    return ipcErr("DB_ERROR", (e as Error).message);
+  }
 }
 
 // --- Sessões ----------------------------------------------------------
