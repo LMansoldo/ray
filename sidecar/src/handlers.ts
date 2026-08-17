@@ -20,6 +20,7 @@ import {
   type TranslateRequest,
   type TranslateResponse,
 } from "./contract.js";
+import { prisma } from "./db.js";
 import { getProvider } from "./providers/registry.js";
 
 // --- Provedores -------------------------------------------------------
@@ -74,22 +75,64 @@ export async function createAssistant(
 export async function startSession(
   req: StartSessionRequest,
 ): Promise<IpcResult<StartSessionResponse>> {
-  // TASK: prisma.session.create(...).
-  return ipcErr("INTERNAL", "not_implemented");
+  try {
+    const session = await prisma.session.create({
+      data: {
+        userId: req.userId,
+        assistantId: req.assistantId ?? null,
+        platform: req.platform ?? "OTHER",
+        sourceLanguage: req.sourceLanguage ?? null,
+        targetLanguage: req.targetLanguage ?? null,
+      },
+    });
+    return { ok: true, value: { sessionId: session.id } };
+  } catch (e) {
+    return ipcErr("DB_ERROR", (e as Error).message);
+  }
 }
 
 export async function appendTranscript(
   req: AppendTranscriptRequest,
 ): Promise<IpcResult<{ segmentId: string }>> {
-  // TASK: prisma.transcriptSegment.create(...).
-  return ipcErr("INTERNAL", "not_implemented");
+  try {
+    const session = await prisma.session.findUnique({
+      where: { id: req.sessionId },
+    });
+    if (!session) {
+      return ipcErr("DB_ERROR", `Session not found: ${req.sessionId}`);
+    }
+
+    const segment = await prisma.transcriptSegment.create({
+      data: {
+        sessionId: req.sessionId,
+        speaker: req.speaker,
+        text: req.text,
+        translatedText: req.translatedText ?? null,
+        startMs: req.startMs,
+        endMs: req.endMs,
+      },
+    });
+    return { ok: true, value: { segmentId: segment.id } };
+  } catch (e) {
+    return ipcErr("DB_ERROR", (e as Error).message);
+  }
 }
 
 export async function endSession(
   req: EndSessionRequest,
 ): Promise<IpcResult<EndSessionResponse>> {
-  // TASK: marcar sessão ENDED; se generateSummary, gerar e persistir Summary.
-  return ipcErr("INTERNAL", "not_implemented");
+  try {
+    const session = await prisma.session.update({
+      where: { id: req.sessionId },
+      data: {
+        status: "ENDED",
+        endedAt: new Date(),
+      },
+    });
+    return { ok: true, value: { sessionId: session.id } };
+  } catch (e) {
+    return ipcErr("DB_ERROR", (e as Error).message);
+  }
 }
 
 // --- Tradução ---------------------------------------------------------
