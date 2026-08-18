@@ -274,7 +274,14 @@ import type {
   InjectedCredential,
 } from "./contract.js";
 
-const { mockGenerateSummary } = vi.hoisted(() => ({
+/** Per-kind provider configs for T-206/T-207 handler tests. */
+const providerConfigs = new Map<string, {
+  validate: (cred: InjectedCredential) => Promise<{ valid: boolean; availableModels?: string[]; reason?: string }>;
+  capabilities: { analysis: boolean; transcription: boolean; translation: boolean };
+  translate: (credential: InjectedCredential, text: string, targetLanguage: string) => Promise<string>;
+}>();
+
+const { mockGenerateSummary, configureProvider } = vi.hoisted(() => ({
   mockGenerateSummary: vi.fn(
     async (
       _segments: TranscriptContextSegment[],
@@ -287,6 +294,21 @@ const { mockGenerateSummary } = vi.hoisted(() => ({
       return { text, actionItems };
     },
   ),
+  /** Per-kind provider config. Set in beforeEach for handler tests. */
+  configureProvider: (
+    kind: string,
+    overrides: Partial<{
+      validate: (cred: InjectedCredential) => Promise<{ valid: boolean; availableModels?: string[]; reason?: string }>;
+      capabilities: { analysis: boolean; transcription: boolean; translation: boolean };
+      translate: (credential: InjectedCredential, text: string, targetLanguage: string) => Promise<string>;
+    }> = {},
+  ) => {
+    providerConfigs.set(kind, {
+      validate: overrides.validate ?? (async () => ({ valid: true })),
+      capabilities: overrides.capabilities ?? { analysis: true, transcription: false, translation: true },
+      translate: overrides.translate ?? (async () => "translated text"),
+    });
+  },
 }));
 
 vi.mock("./agent/summary.js", () => {
@@ -300,15 +322,18 @@ vi.mock("./agent/summary.js", () => {
 // ---------------------------------------------------------------------------
 
 vi.mock("./providers/registry.js", () => ({
-  getProvider: (_kind: string) => ({
-    kind: "OPENAI",
-    capabilities: { analysis: true, transcription: false, translation: false },
-    validate: async () => ({ valid: true }),
-    analyzeStream: async function* () {
-      yield { text: "fake" };
-    },
-    async translate() { throw new Error("not supported"); },
-  }),
+  getProvider: (kind: string) => {
+    const config = providerConfigs.get(kind);
+    return {
+      kind,
+      capabilities: config?.capabilities ?? { analysis: true, transcription: false, translation: true },
+      validate: config?.validate ?? (async () => ({ valid: true })),
+      analyzeStream: async function* () {
+        yield { text: "fake" };
+      },
+      translate: config?.translate ?? (async () => "translated text"),
+    };
+  },
 }));
 
 // ---------------------------------------------------------------------------
@@ -320,6 +345,8 @@ import {
   startSession,
   appendTranscript,
   endSession,
+  validateCredential,
+  translate,
 } from "./handlers.js";
 import type {
   CreateAssistantRequest,
@@ -330,6 +357,10 @@ import type {
   IpcResult,
   StartSessionResponse,
   EndSessionResponse,
+  ValidateCredentialRequest,
+  ValidateCredentialResponse,
+  TranslateRequest,
+  TranslateResponse,
 } from "./contract.js";
 
 // ---------------------------------------------------------------------------
@@ -924,6 +955,702 @@ describe("session handlers (T-100)", () => {
       expect(result.error.message).not.toContain("sk-super-secret-key-12345");
       expect(result.error.message).not.toContain("secret");
       expect(result.error.message).not.toContain("credential");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateCredential (T-206)
+// ---------------------------------------------------------------------------
+
+const SENTINEL_SECRET = "sk-T206-sentinel-NEVER-LEAK-99999";
+
+function fakeCredential(kind: string): InjectedCredential {
+  return {
+    kind: kind as InjectedCredential["kind"],
+    connectionMode: "API_KEY",
+    secret: SENTINEL_SECRET,
+    baseUrl: "https://fake.example.com",
+    model: "test-model",
+  };
+}
+
+describe("validateCredential (T-206)", () => {
+  beforeEach(() => {
+    providerConfigs.clear();
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  // -------------------------------------------------------------------------
+  // Delegation: correct adapter by kind
+  // -------------------------------------------------------------------------
+
+  describe("delegation — correct adapter by kind", () => {
+    it.each(["OPENAI", "ANTHROPIC", "GEMINI", "DEEPSEEK", "OPENROUTER", "GENERIC"])(
+      "delegates to the %s adapter via getProvider(kind) and calls validate with the credential",
+      async (kind) => {
+        let receivedCred: InjectedCredential | undefined;
+        configureProvider(kind, {
+          validate: async (cred) => {
+            receivedCred = cred;
+            return { valid: true, availableModels: ["model-a"] };
+          },
+        });
+
+        const credential = fakeCredential(kind);
+        const req: ValidateCredentialRequest = { credential };
+        await validateCredential(req);
+
+        expect(receivedCred).toBeDefined();
+        expect(receivedCred).toBe(credential);
+        expect(receivedCred!.kind).toBe(kind);
+        expect(receivedCred!.secret).toBe(SENTINEL_SECRET);
+      },
+    );
+
+    it("does not branch on ProviderKind — each kind delegates to its own adapter without a conditional in the handler", async () => {
+      // Configure two providers with distinct return values.
+      configureProvider("OPENAI", {
+        validate: async () => ({ valid: true, availableModels: ["gpt-4o"] }),
+      });
+      configureProvider("ANTHROPIC", {
+        validate: async () => ({ valid: true, availableModels: ["claude-sonnet-5"] }),
+      });
+
+      const openaiResult = await validateCredential({
+        credential: fakeCredential("OPENAI"),
+      });
+      const anthropicResult = await validateCredential({
+        credential: fakeCredential("ANTHROPIC"),
+      });
+
+      expect(openaiResult.ok).toBe(true);
+      expect(anthropicResult.ok).toBe(true);
+      if (openaiResult.ok && anthropicResult.ok) {
+        expect(openaiResult.value.availableModels).toEqual(["gpt-4o"]);
+        expect(anthropicResult.value.availableModels).toEqual(["claude-sonnet-5"]);
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Envelope: adapter result passed through as { ok: true, value }
+  // -------------------------------------------------------------------------
+
+  describe("envelope — adapter result passed through as { ok: true, value }", () => {
+    it("wraps a valid result with availableModels as { ok: true, value }", async () => {
+      configureProvider("OPENAI", {
+        validate: async () => ({ valid: true, availableModels: ["gpt-4o", "gpt-4o-mini"] }),
+      });
+
+      const result = await validateCredential({
+        credential: fakeCredential("OPENAI"),
+      });
+
+      expect(result).toEqual({
+        ok: true,
+        value: { valid: true, availableModels: ["gpt-4o", "gpt-4o-mini"] },
+      });
+    });
+
+    it("wraps a valid result without availableModels as { ok: true, value }", async () => {
+      configureProvider("GEMINI", {
+        validate: async () => ({ valid: true }),
+      });
+
+      const result = await validateCredential({
+        credential: fakeCredential("GEMINI"),
+      });
+
+      expect(result).toEqual({ ok: true, value: { valid: true } });
+    });
+
+    it("wraps an invalid result with reason as { ok: true, value }", async () => {
+      configureProvider("DEEPSEEK", {
+        validate: async () => ({ valid: false, reason: "Unauthorized: invalid API key" }),
+      });
+
+      const result = await validateCredential({
+        credential: fakeCredential("DEEPSEEK"),
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.valid).toBe(false);
+      expect(result.value.reason).toBe("Unauthorized: invalid API key");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Failure mapping: adapter errors → { ok: false, error }
+  // Uses ProviderError (typed signal) for provider/network failures,
+  // plain Error for unexpected failures — no fragile message-pattern matching.
+  // -------------------------------------------------------------------------
+
+  describe("failure mapping — adapter errors to IpcError", () => {
+    it("maps a ProviderError to PROVIDER_UNAVAILABLE (typed signal, not message pattern)", async () => {
+      const { ProviderError } = await import("./handlers.js");
+      configureProvider("OPENAI", {
+        validate: async () => {
+          throw new ProviderError("fetch failed");
+        },
+      });
+
+      const result = await validateCredential({
+        credential: fakeCredential("OPENAI"),
+      });
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe("PROVIDER_UNAVAILABLE");
+      expect(result.error.message.length).toBeGreaterThan(0);
+    });
+
+    it("maps a ProviderError with HTTP status to PROVIDER_UNAVAILABLE", async () => {
+      const { ProviderError } = await import("./handlers.js");
+      configureProvider("ANTHROPIC", {
+        validate: async () => {
+          throw new ProviderError("Anthropic API error: HTTP 503");
+        },
+      });
+
+      const result = await validateCredential({
+        credential: fakeCredential("ANTHROPIC"),
+      });
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe("PROVIDER_UNAVAILABLE");
+      expect(result.error.message.length).toBeGreaterThan(0);
+    });
+
+    it("maps a CapabilityNotSupported error to PROVIDER_UNAVAILABLE", async () => {
+      const { CapabilityNotSupported } = await import("./providers/provider.js");
+      configureProvider("GENERIC", {
+        validate: async () => {
+          throw new CapabilityNotSupported("GENERIC", "analysis");
+        },
+      });
+
+      const result = await validateCredential({
+        credential: fakeCredential("GENERIC"),
+      });
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe("PROVIDER_UNAVAILABLE");
+    });
+
+    it("maps an unexpected (non-provider) error to INTERNAL", async () => {
+      configureProvider("DEEPSEEK", {
+        validate: async () => {
+          throw new Error("something completely unexpected");
+        },
+      });
+
+      const result = await validateCredential({
+        credential: fakeCredential("DEEPSEEK"),
+      });
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe("INTERNAL");
+      expect(result.error.message.length).toBeGreaterThan(0);
+    });
+
+    it("distinguishes ProviderError (PROVIDER_UNAVAILABLE) from plain Error (INTERNAL) by type, not by message text", async () => {
+      const { ProviderError } = await import("./handlers.js");
+
+      // Same message text, different error types → different IpcError codes.
+      const sharedMessage = "connection refused";
+
+      configureProvider("OPENAI", {
+        validate: async () => {
+          throw new ProviderError(sharedMessage);
+        },
+      });
+      const providerResult = await validateCredential({
+        credential: fakeCredential("OPENAI"),
+      });
+
+      configureProvider("OPENAI", {
+        validate: async () => {
+          throw new Error(sharedMessage);
+        },
+      });
+      const unexpectedResult = await validateCredential({
+        credential: fakeCredential("OPENAI"),
+      });
+
+      expect(providerResult.ok).toBe(false);
+      expect(unexpectedResult.ok).toBe(false);
+      if (!providerResult.ok && !unexpectedResult.ok) {
+        expect(providerResult.error.code).toBe("PROVIDER_UNAVAILABLE");
+        expect(unexpectedResult.error.code).toBe("INTERNAL");
+      }
+    });
+
+    it("never produces an unhandled rejection when adapter throws", async () => {
+      const { ProviderError } = await import("./handlers.js");
+      configureProvider("OPENROUTER", {
+        validate: async () => {
+          throw new ProviderError("network timeout");
+        },
+      });
+
+      // Should resolve (not reject) with an error envelope.
+      const result = await validateCredential({
+        credential: fakeCredential("OPENROUTER"),
+      });
+      expect(result.ok).toBe(false);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Secret safety: the secret never appears in any result field
+  // Error messages that embed the sentinel secret must be sanitized before
+  // crossing the IPC boundary (ADR-003, RNF-301).
+  // -------------------------------------------------------------------------
+
+  describe("secret safety — secret never leaks", () => {
+    it("does not include the secret in a success result", async () => {
+      configureProvider("OPENAI", {
+        validate: async () => ({ valid: true, availableModels: ["gpt-4o"] }),
+      });
+
+      const result = await validateCredential({
+        credential: fakeCredential("OPENAI"),
+      });
+
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(SENTINEL_SECRET);
+      expect(serialized).not.toContain("NEVER-LEAK");
+    });
+
+    it("strips the secret from error messages when the adapter throws an error containing the secret", async () => {
+      // The error message EMBEDS the sentinel secret — a real scenario when
+      // an API returns "401 Unauthorized: invalid key sk-xxx" in its response.
+      configureProvider("ANTHROPIC", {
+        validate: async () => {
+          throw new Error("401 Unauthorized for key " + SENTINEL_SECRET);
+        },
+      });
+
+      const result = await validateCredential({
+        credential: fakeCredential("ANTHROPIC"),
+      });
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      // The handler must strip the secret before it crosses the IPC boundary.
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(SENTINEL_SECRET);
+      expect(serialized).not.toContain("NEVER-LEAK");
+      // The error message should still exist (not empty), just sanitized.
+      expect(result.error.message.length).toBeGreaterThan(0);
+    });
+
+    it("strips the secret from ProviderError messages that embed the secret", async () => {
+      const { ProviderError } = await import("./handlers.js");
+      // A provider error whose message also embeds the secret.
+      configureProvider("OPENAI", {
+        validate: async () => {
+          throw new ProviderError("HTTP 401: invalid key " + SENTINEL_SECRET);
+        },
+      });
+
+      const result = await validateCredential({
+        credential: fakeCredential("OPENAI"),
+      });
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(SENTINEL_SECRET);
+      expect(serialized).not.toContain("NEVER-LEAK");
+      expect(result.error.message.length).toBeGreaterThan(0);
+    });
+
+    it("does not include the secret in an invalid-credential result (adapter-controlled reason)", async () => {
+      configureProvider("GEMINI", {
+        validate: async () => ({ valid: false, reason: "Unauthorized: invalid API key" }),
+      });
+
+      const result = await validateCredential({
+        credential: fakeCredential("GEMINI"),
+      });
+
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(SENTINEL_SECRET);
+      expect(serialized).not.toContain("NEVER-LEAK");
+    });
+
+    it("does not leak the secret via error message when CapabilityNotSupported is thrown", async () => {
+      const { CapabilityNotSupported } = await import("./providers/provider.js");
+      configureProvider("GENERIC", {
+        validate: async () => {
+          throw new CapabilityNotSupported("GENERIC", "analysis");
+        },
+      });
+
+      const result = await validateCredential({
+        credential: fakeCredential("GENERIC"),
+      });
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(SENTINEL_SECRET);
+      expect(serialized).not.toContain("NEVER-LEAK");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// translate (T-207)
+// ---------------------------------------------------------------------------
+
+describe("translate (T-207)", () => {
+  beforeEach(() => {
+    providerConfigs.clear();
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function fakeTranslateReq(overrides: Partial<TranslateRequest> = {}): TranslateRequest {
+    return {
+      sessionId: "session_translate_1",
+      text: "Hello, how are you?",
+      targetLanguage: "pt",
+      credential: fakeCredential("OPENAI"),
+      ...overrides,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Success path: delegates to adapter translate, returns { translatedText }
+  // -------------------------------------------------------------------------
+
+  describe("success path — delegates to adapter translate", () => {
+    it.each(["OPENAI", "ANTHROPIC", "GEMINI", "DEEPSEEK", "OPENROUTER", "GENERIC"])(
+      "delegates to the %s adapter's translate(credential, text, targetLanguage) and returns { ok: true, value: { translatedText } }",
+      async (kind) => {
+        let receivedArgs: { credential?: InjectedCredential; text?: string; targetLanguage?: string } | undefined;
+        configureProvider(kind, {
+          translate: async (credential, text, targetLanguage) => {
+            receivedArgs = { credential, text, targetLanguage };
+            return "Ola, como voce esta?";
+          },
+        });
+
+        const credential = fakeCredential(kind);
+        const req = fakeTranslateReq({ credential });
+        const result: IpcResult<TranslateResponse> = await translate(req);
+
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.translatedText).toBe("Ola, como voce esta?");
+
+        // Verify the adapter received the exact arguments.
+        expect(receivedArgs).toBeDefined();
+        expect(receivedArgs!.credential).toBe(credential);
+        expect(receivedArgs!.text).toBe("Hello, how are you?");
+        expect(receivedArgs!.targetLanguage).toBe("pt");
+      },
+    );
+
+    it("does not branch on ProviderKind — delegates via getProvider only", async () => {
+      configureProvider("OPENAI", {
+        translate: async () => "openai translation",
+      });
+      configureProvider("ANTHROPIC", {
+        translate: async () => "anthropic translation",
+      });
+
+      const openaiResult = await translate(fakeTranslateReq({
+        credential: fakeCredential("OPENAI"),
+      }));
+      const anthropicResult = await translate(fakeTranslateReq({
+        credential: fakeCredential("ANTHROPIC"),
+      }));
+
+      expect(openaiResult.ok).toBe(true);
+      expect(anthropicResult.ok).toBe(true);
+      if (openaiResult.ok && anthropicResult.ok) {
+        expect(openaiResult.value.translatedText).toBe("openai translation");
+        expect(anthropicResult.value.translatedText).toBe("anthropic translation");
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Capability gating: translation required
+  // -------------------------------------------------------------------------
+
+  describe("capability gating — requires translation capability", () => {
+    it("returns { ok: false, error } with a specific IpcError code when adapter does not support translation", async () => {
+      configureProvider("OPENAI", {
+        capabilities: { analysis: true, transcription: false, translation: false },
+        translate: async () => {
+          throw new Error("should not be called");
+        },
+      });
+
+      const result = await translate(fakeTranslateReq({
+        credential: fakeCredential("OPENAI"),
+      }));
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      // The handler must return a specific IpcError code, not a generic one.
+      // PROVIDER_UNAVAILABLE is the expected code for a missing capability.
+      expect(result.error.code).toBe("PROVIDER_UNAVAILABLE");
+      expect(result.error.message.length).toBeGreaterThan(0);
+    });
+
+    it("never throws or crashes — always returns an IpcError envelope", async () => {
+      configureProvider("GENERIC", {
+        capabilities: { analysis: true, transcription: false, translation: false },
+        translate: async () => {
+          throw new Error("should not be called");
+        },
+      });
+
+      // Should resolve (not reject) with an error envelope.
+      const result = await translate(fakeTranslateReq({
+        credential: fakeCredential("GENERIC"),
+      }));
+      expect(result.ok).toBe(false);
+      // Must be a specific error code, not a generic one.
+      if (result.ok) return;
+      expect(result.error.code).toBe("PROVIDER_UNAVAILABLE");
+    });
+
+    it("mentions the missing capability in the error message", async () => {
+      configureProvider("DEEPSEEK", {
+        capabilities: { analysis: true, transcription: false, translation: false },
+        translate: async () => {
+          throw new Error("should not be called");
+        },
+      });
+
+      const result = await translate(fakeTranslateReq({
+        credential: fakeCredential("DEEPSEEK"),
+      }));
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      // The error message should indicate which capability is missing.
+      expect(result.error.message).toMatch(/translat/i);
+      // Must be a specific error code.
+      expect(result.error.code).toBe("PROVIDER_UNAVAILABLE");
+    });
+
+    it("delegates to adapter when translation capability is true", async () => {
+      configureProvider("ANTHROPIC", {
+        capabilities: { analysis: true, transcription: false, translation: true },
+        translate: async () => "Ola mundo",
+      });
+
+      const result = await translate(fakeTranslateReq({
+        credential: fakeCredential("ANTHROPIC"),
+      }));
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.translatedText).toBe("Ola mundo");
+    });
+
+    it("does NOT gate when capabilities.translation is true — succeeds instead of erroring", async () => {
+      configureProvider("GEMINI", {
+        capabilities: { analysis: true, transcription: true, translation: true },
+        translate: async () => "Gemini translated",
+      });
+
+      const result = await translate(fakeTranslateReq({
+        credential: fakeCredential("GEMINI"),
+      }));
+
+      // This must succeed — the capability check must pass through.
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.translatedText).toBe("Gemini translated");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Envelope: adapter errors mapped to IpcError, never unhandled rejection
+  // -------------------------------------------------------------------------
+
+  describe("envelope — adapter errors mapped to IpcError", () => {
+    it("maps a ProviderError to PROVIDER_UNAVAILABLE", async () => {
+      const { ProviderError } = await import("./handlers.js");
+      configureProvider("OPENAI", {
+        translate: async () => {
+          throw new ProviderError("network timeout");
+        },
+      });
+
+      const result = await translate(fakeTranslateReq());
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe("PROVIDER_UNAVAILABLE");
+      expect(result.error.message.length).toBeGreaterThan(0);
+    });
+
+    it("maps a CapabilityNotSupported to PROVIDER_UNAVAILABLE", async () => {
+      const { CapabilityNotSupported } = await import("./providers/provider.js");
+      configureProvider("GEMINI", {
+        translate: async () => {
+          throw new CapabilityNotSupported("GEMINI", "translation");
+        },
+      });
+
+      const result = await translate(fakeTranslateReq({
+        credential: fakeCredential("GEMINI"),
+      }));
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe("PROVIDER_UNAVAILABLE");
+    });
+
+    it("maps an unexpected error to INTERNAL", async () => {
+      configureProvider("DEEPSEEK", {
+        translate: async () => {
+          throw new Error("something completely unexpected");
+        },
+      });
+
+      const result = await translate(fakeTranslateReq({
+        credential: fakeCredential("DEEPSEEK"),
+      }));
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe("INTERNAL");
+      expect(result.error.message.length).toBeGreaterThan(0);
+    });
+
+    it("never produces an unhandled rejection when adapter throws", async () => {
+      const { ProviderError } = await import("./handlers.js");
+      configureProvider("OPENROUTER", {
+        translate: async () => {
+          throw new ProviderError("API unreachable");
+        },
+      });
+
+      // Should resolve (not reject) with an error envelope.
+      const result = await translate(fakeTranslateReq({
+        credential: fakeCredential("OPENROUTER"),
+      }));
+      expect(result.ok).toBe(false);
+    });
+
+    it("distinguishes ProviderError (PROVIDER_UNAVAILABLE) from plain Error (INTERNAL) by type", async () => {
+      const { ProviderError } = await import("./handlers.js");
+      const sharedMessage = "connection refused";
+
+      configureProvider("OPENAI", {
+        translate: async () => {
+          throw new ProviderError(sharedMessage);
+        },
+      });
+      const providerResult = await translate(fakeTranslateReq());
+
+      configureProvider("OPENAI", {
+        translate: async () => {
+          throw new Error(sharedMessage);
+        },
+      });
+      const unexpectedResult = await translate(fakeTranslateReq());
+
+      expect(providerResult.ok).toBe(false);
+      expect(unexpectedResult.ok).toBe(false);
+      if (!providerResult.ok && !unexpectedResult.ok) {
+        expect(providerResult.error.code).toBe("PROVIDER_UNAVAILABLE");
+        expect(unexpectedResult.error.code).toBe("INTERNAL");
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Secret safety: secret never appears in any result/error field
+  // -------------------------------------------------------------------------
+
+  describe("secret safety — secret never leaks", () => {
+    it("does not include the secret in a success result", async () => {
+      configureProvider("OPENAI", {
+        translate: async () => "Ola",
+      });
+
+      const result = await translate(fakeTranslateReq());
+
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(SENTINEL_SECRET);
+      expect(serialized).not.toContain("NEVER-LEAK");
+    });
+
+    it("strips the secret from error messages when the adapter throws an error containing the secret", async () => {
+      configureProvider("ANTHROPIC", {
+        translate: async () => {
+          throw new Error("401 Unauthorized for key " + SENTINEL_SECRET);
+        },
+      });
+
+      const result = await translate(fakeTranslateReq({
+        credential: fakeCredential("ANTHROPIC"),
+      }));
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(SENTINEL_SECRET);
+      expect(serialized).not.toContain("NEVER-LEAK");
+      expect(result.error.message.length).toBeGreaterThan(0);
+    });
+
+    it("strips the secret from ProviderError messages that embed the secret", async () => {
+      const { ProviderError } = await import("./handlers.js");
+      configureProvider("OPENAI", {
+        translate: async () => {
+          throw new ProviderError("HTTP 401: invalid key " + SENTINEL_SECRET);
+        },
+      });
+
+      const result = await translate(fakeTranslateReq());
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(SENTINEL_SECRET);
+      expect(serialized).not.toContain("NEVER-LEAK");
+    });
+
+    it("does not leak the secret via CapabilityNotSupported error messages", async () => {
+      const { CapabilityNotSupported } = await import("./providers/provider.js");
+      configureProvider("GENERIC", {
+        capabilities: { analysis: true, transcription: false, translation: false },
+        translate: async () => {
+          throw new CapabilityNotSupported("GENERIC", "translation");
+        },
+      });
+
+      const result = await translate(fakeTranslateReq({
+        credential: fakeCredential("GENERIC"),
+      }));
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(SENTINEL_SECRET);
+      expect(serialized).not.toContain("NEVER-LEAK");
     });
   });
 });
