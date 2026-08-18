@@ -19,9 +19,19 @@ ts-rs = "10"
 # HTTP client para falar com o sidecar em loopback (ADR-005).
 reqwest = { version = "0.12", features = ["json", "stream"] }
 tokio = { version = "1", features = ["full"] }
-# Cofre de credenciais nativo por plataforma (ADR-003).
-keyring = "3"
 thiserror = "2"
+
+# Cofre de credenciais nativo por plataforma (ADR-003).
+# Features por SO: apple-native (macOS), linux-native (Linux), windows-native (Windows).
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["linux-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
