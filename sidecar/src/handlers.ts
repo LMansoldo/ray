@@ -238,6 +238,26 @@ export async function endSession(
 export async function translate(
   req: TranslateRequest,
 ): Promise<IpcResult<TranslateResponse>> {
-  // TASK: delegar ao adapter (capability translation).
-  return ipcErr("INTERNAL", "not_implemented");
+  try {
+    const provider = getProvider(req.credential.kind);
+    if (!provider.capabilities.translation) {
+      return ipcErr(
+        "PROVIDER_UNAVAILABLE",
+        `Provider ${req.credential.kind} does not support translation`,
+      );
+    }
+    const translatedText = await provider.translate(
+      req.credential,
+      req.text,
+      req.targetLanguage,
+    );
+    return { ok: true, value: { translatedText } };
+  } catch (e) {
+    const raw = (e as Error).message;
+    const message = sanitizeSecret(raw, req.credential.secret);
+    if (e instanceof ProviderError || e instanceof CapabilityNotSupported) {
+      return ipcErr("PROVIDER_UNAVAILABLE", message);
+    }
+    return ipcErr("INTERNAL", message);
+  }
 }

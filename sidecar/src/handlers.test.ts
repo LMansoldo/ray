@@ -274,8 +274,12 @@ import type {
   InjectedCredential,
 } from "./contract.js";
 
-/** Per-kind provider configs for T-206 validateCredential tests. */
-const providerConfigs = new Map<string, { validate: (cred: InjectedCredential) => Promise<{ valid: boolean; availableModels?: string[]; reason?: string }> }>();
+/** Per-kind provider configs for T-206/T-207 handler tests. */
+const providerConfigs = new Map<string, {
+  validate: (cred: InjectedCredential) => Promise<{ valid: boolean; availableModels?: string[]; reason?: string }>;
+  capabilities: { analysis: boolean; transcription: boolean; translation: boolean };
+  translate: (credential: InjectedCredential, text: string, targetLanguage: string) => Promise<string>;
+}>();
 
 const { mockGenerateSummary, configureProvider } = vi.hoisted(() => ({
   mockGenerateSummary: vi.fn(
@@ -290,15 +294,19 @@ const { mockGenerateSummary, configureProvider } = vi.hoisted(() => ({
       return { text, actionItems };
     },
   ),
-  /** Per-kind provider config. Set in beforeEach for validateCredential tests. */
+  /** Per-kind provider config. Set in beforeEach for handler tests. */
   configureProvider: (
     kind: string,
     overrides: Partial<{
       validate: (cred: InjectedCredential) => Promise<{ valid: boolean; availableModels?: string[]; reason?: string }>;
+      capabilities: { analysis: boolean; transcription: boolean; translation: boolean };
+      translate: (credential: InjectedCredential, text: string, targetLanguage: string) => Promise<string>;
     }> = {},
   ) => {
     providerConfigs.set(kind, {
       validate: overrides.validate ?? (async () => ({ valid: true })),
+      capabilities: overrides.capabilities ?? { analysis: true, transcription: false, translation: true },
+      translate: overrides.translate ?? (async () => "translated text"),
     });
   },
 }));
@@ -318,12 +326,12 @@ vi.mock("./providers/registry.js", () => ({
     const config = providerConfigs.get(kind);
     return {
       kind,
-      capabilities: { analysis: true, transcription: false, translation: false },
+      capabilities: config?.capabilities ?? { analysis: true, transcription: false, translation: true },
       validate: config?.validate ?? (async () => ({ valid: true })),
       analyzeStream: async function* () {
         yield { text: "fake" };
       },
-      async translate() { throw new Error("not supported"); },
+      translate: config?.translate ?? (async () => "translated text"),
     };
   },
 }));
@@ -338,6 +346,7 @@ import {
   appendTranscript,
   endSession,
   validateCredential,
+  translate,
 } from "./handlers.js";
 import type {
   CreateAssistantRequest,
@@ -350,6 +359,8 @@ import type {
   EndSessionResponse,
   ValidateCredentialRequest,
   ValidateCredentialResponse,
+  TranslateRequest,
+  TranslateResponse,
 } from "./contract.js";
 
 // ---------------------------------------------------------------------------
@@ -1288,6 +1299,352 @@ describe("validateCredential (T-206)", () => {
       const result = await validateCredential({
         credential: fakeCredential("GENERIC"),
       });
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(SENTINEL_SECRET);
+      expect(serialized).not.toContain("NEVER-LEAK");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// translate (T-207)
+// ---------------------------------------------------------------------------
+
+describe("translate (T-207)", () => {
+  beforeEach(() => {
+    providerConfigs.clear();
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function fakeTranslateReq(overrides: Partial<TranslateRequest> = {}): TranslateRequest {
+    return {
+      sessionId: "session_translate_1",
+      text: "Hello, how are you?",
+      targetLanguage: "pt",
+      credential: fakeCredential("OPENAI"),
+      ...overrides,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Success path: delegates to adapter translate, returns { translatedText }
+  // -------------------------------------------------------------------------
+
+  describe("success path — delegates to adapter translate", () => {
+    it.each(["OPENAI", "ANTHROPIC", "GEMINI", "DEEPSEEK", "OPENROUTER", "GENERIC"])(
+      "delegates to the %s adapter's translate(credential, text, targetLanguage) and returns { ok: true, value: { translatedText } }",
+      async (kind) => {
+        let receivedArgs: { credential?: InjectedCredential; text?: string; targetLanguage?: string } | undefined;
+        configureProvider(kind, {
+          translate: async (credential, text, targetLanguage) => {
+            receivedArgs = { credential, text, targetLanguage };
+            return "Ola, como voce esta?";
+          },
+        });
+
+        const credential = fakeCredential(kind);
+        const req = fakeTranslateReq({ credential });
+        const result: IpcResult<TranslateResponse> = await translate(req);
+
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.translatedText).toBe("Ola, como voce esta?");
+
+        // Verify the adapter received the exact arguments.
+        expect(receivedArgs).toBeDefined();
+        expect(receivedArgs!.credential).toBe(credential);
+        expect(receivedArgs!.text).toBe("Hello, how are you?");
+        expect(receivedArgs!.targetLanguage).toBe("pt");
+      },
+    );
+
+    it("does not branch on ProviderKind — delegates via getProvider only", async () => {
+      configureProvider("OPENAI", {
+        translate: async () => "openai translation",
+      });
+      configureProvider("ANTHROPIC", {
+        translate: async () => "anthropic translation",
+      });
+
+      const openaiResult = await translate(fakeTranslateReq({
+        credential: fakeCredential("OPENAI"),
+      }));
+      const anthropicResult = await translate(fakeTranslateReq({
+        credential: fakeCredential("ANTHROPIC"),
+      }));
+
+      expect(openaiResult.ok).toBe(true);
+      expect(anthropicResult.ok).toBe(true);
+      if (openaiResult.ok && anthropicResult.ok) {
+        expect(openaiResult.value.translatedText).toBe("openai translation");
+        expect(anthropicResult.value.translatedText).toBe("anthropic translation");
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Capability gating: translation required
+  // -------------------------------------------------------------------------
+
+  describe("capability gating — requires translation capability", () => {
+    it("returns { ok: false, error } with a specific IpcError code when adapter does not support translation", async () => {
+      configureProvider("OPENAI", {
+        capabilities: { analysis: true, transcription: false, translation: false },
+        translate: async () => {
+          throw new Error("should not be called");
+        },
+      });
+
+      const result = await translate(fakeTranslateReq({
+        credential: fakeCredential("OPENAI"),
+      }));
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      // The handler must return a specific IpcError code, not a generic one.
+      // PROVIDER_UNAVAILABLE is the expected code for a missing capability.
+      expect(result.error.code).toBe("PROVIDER_UNAVAILABLE");
+      expect(result.error.message.length).toBeGreaterThan(0);
+    });
+
+    it("never throws or crashes — always returns an IpcError envelope", async () => {
+      configureProvider("GENERIC", {
+        capabilities: { analysis: true, transcription: false, translation: false },
+        translate: async () => {
+          throw new Error("should not be called");
+        },
+      });
+
+      // Should resolve (not reject) with an error envelope.
+      const result = await translate(fakeTranslateReq({
+        credential: fakeCredential("GENERIC"),
+      }));
+      expect(result.ok).toBe(false);
+      // Must be a specific error code, not a generic one.
+      if (result.ok) return;
+      expect(result.error.code).toBe("PROVIDER_UNAVAILABLE");
+    });
+
+    it("mentions the missing capability in the error message", async () => {
+      configureProvider("DEEPSEEK", {
+        capabilities: { analysis: true, transcription: false, translation: false },
+        translate: async () => {
+          throw new Error("should not be called");
+        },
+      });
+
+      const result = await translate(fakeTranslateReq({
+        credential: fakeCredential("DEEPSEEK"),
+      }));
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      // The error message should indicate which capability is missing.
+      expect(result.error.message).toMatch(/translat/i);
+      // Must be a specific error code.
+      expect(result.error.code).toBe("PROVIDER_UNAVAILABLE");
+    });
+
+    it("delegates to adapter when translation capability is true", async () => {
+      configureProvider("ANTHROPIC", {
+        capabilities: { analysis: true, transcription: false, translation: true },
+        translate: async () => "Ola mundo",
+      });
+
+      const result = await translate(fakeTranslateReq({
+        credential: fakeCredential("ANTHROPIC"),
+      }));
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.translatedText).toBe("Ola mundo");
+    });
+
+    it("does NOT gate when capabilities.translation is true — succeeds instead of erroring", async () => {
+      configureProvider("GEMINI", {
+        capabilities: { analysis: true, transcription: true, translation: true },
+        translate: async () => "Gemini translated",
+      });
+
+      const result = await translate(fakeTranslateReq({
+        credential: fakeCredential("GEMINI"),
+      }));
+
+      // This must succeed — the capability check must pass through.
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.translatedText).toBe("Gemini translated");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Envelope: adapter errors mapped to IpcError, never unhandled rejection
+  // -------------------------------------------------------------------------
+
+  describe("envelope — adapter errors mapped to IpcError", () => {
+    it("maps a ProviderError to PROVIDER_UNAVAILABLE", async () => {
+      const { ProviderError } = await import("./handlers.js");
+      configureProvider("OPENAI", {
+        translate: async () => {
+          throw new ProviderError("network timeout");
+        },
+      });
+
+      const result = await translate(fakeTranslateReq());
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe("PROVIDER_UNAVAILABLE");
+      expect(result.error.message.length).toBeGreaterThan(0);
+    });
+
+    it("maps a CapabilityNotSupported to PROVIDER_UNAVAILABLE", async () => {
+      const { CapabilityNotSupported } = await import("./providers/provider.js");
+      configureProvider("GEMINI", {
+        translate: async () => {
+          throw new CapabilityNotSupported("GEMINI", "translation");
+        },
+      });
+
+      const result = await translate(fakeTranslateReq({
+        credential: fakeCredential("GEMINI"),
+      }));
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe("PROVIDER_UNAVAILABLE");
+    });
+
+    it("maps an unexpected error to INTERNAL", async () => {
+      configureProvider("DEEPSEEK", {
+        translate: async () => {
+          throw new Error("something completely unexpected");
+        },
+      });
+
+      const result = await translate(fakeTranslateReq({
+        credential: fakeCredential("DEEPSEEK"),
+      }));
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe("INTERNAL");
+      expect(result.error.message.length).toBeGreaterThan(0);
+    });
+
+    it("never produces an unhandled rejection when adapter throws", async () => {
+      const { ProviderError } = await import("./handlers.js");
+      configureProvider("OPENROUTER", {
+        translate: async () => {
+          throw new ProviderError("API unreachable");
+        },
+      });
+
+      // Should resolve (not reject) with an error envelope.
+      const result = await translate(fakeTranslateReq({
+        credential: fakeCredential("OPENROUTER"),
+      }));
+      expect(result.ok).toBe(false);
+    });
+
+    it("distinguishes ProviderError (PROVIDER_UNAVAILABLE) from plain Error (INTERNAL) by type", async () => {
+      const { ProviderError } = await import("./handlers.js");
+      const sharedMessage = "connection refused";
+
+      configureProvider("OPENAI", {
+        translate: async () => {
+          throw new ProviderError(sharedMessage);
+        },
+      });
+      const providerResult = await translate(fakeTranslateReq());
+
+      configureProvider("OPENAI", {
+        translate: async () => {
+          throw new Error(sharedMessage);
+        },
+      });
+      const unexpectedResult = await translate(fakeTranslateReq());
+
+      expect(providerResult.ok).toBe(false);
+      expect(unexpectedResult.ok).toBe(false);
+      if (!providerResult.ok && !unexpectedResult.ok) {
+        expect(providerResult.error.code).toBe("PROVIDER_UNAVAILABLE");
+        expect(unexpectedResult.error.code).toBe("INTERNAL");
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Secret safety: secret never appears in any result/error field
+  // -------------------------------------------------------------------------
+
+  describe("secret safety — secret never leaks", () => {
+    it("does not include the secret in a success result", async () => {
+      configureProvider("OPENAI", {
+        translate: async () => "Ola",
+      });
+
+      const result = await translate(fakeTranslateReq());
+
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(SENTINEL_SECRET);
+      expect(serialized).not.toContain("NEVER-LEAK");
+    });
+
+    it("strips the secret from error messages when the adapter throws an error containing the secret", async () => {
+      configureProvider("ANTHROPIC", {
+        translate: async () => {
+          throw new Error("401 Unauthorized for key " + SENTINEL_SECRET);
+        },
+      });
+
+      const result = await translate(fakeTranslateReq({
+        credential: fakeCredential("ANTHROPIC"),
+      }));
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(SENTINEL_SECRET);
+      expect(serialized).not.toContain("NEVER-LEAK");
+      expect(result.error.message.length).toBeGreaterThan(0);
+    });
+
+    it("strips the secret from ProviderError messages that embed the secret", async () => {
+      const { ProviderError } = await import("./handlers.js");
+      configureProvider("OPENAI", {
+        translate: async () => {
+          throw new ProviderError("HTTP 401: invalid key " + SENTINEL_SECRET);
+        },
+      });
+
+      const result = await translate(fakeTranslateReq());
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(SENTINEL_SECRET);
+      expect(serialized).not.toContain("NEVER-LEAK");
+    });
+
+    it("does not leak the secret via CapabilityNotSupported error messages", async () => {
+      const { CapabilityNotSupported } = await import("./providers/provider.js");
+      configureProvider("GENERIC", {
+        capabilities: { analysis: true, transcription: false, translation: false },
+        translate: async () => {
+          throw new CapabilityNotSupported("GENERIC", "translation");
+        },
+      });
+
+      const result = await translate(fakeTranslateReq({
+        credential: fakeCredential("GENERIC"),
+      }));
 
       expect(result.ok).toBe(false);
       if (result.ok) return;
