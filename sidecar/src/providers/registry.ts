@@ -6,10 +6,11 @@
 import type { AiProvider } from "./provider.js";
 import type { ProviderKind } from "./types.js";
 import { OpenAiProvider } from "./openai.js";
+import { AnthropicProvider } from "./anthropic.js";
 
 const registry = new Map<ProviderKind, AiProvider>([
   ["OPENAI", new OpenAiProvider()],
-  // ["ANTHROPIC", new AnthropicProvider()],
+  ["ANTHROPIC", new AnthropicProvider()],
   // ["GEMINI", new GeminiProvider()],
   // ["DEEPSEEK", new DeepSeekProvider()],
   // ["OPENROUTER", new OpenRouterProvider()],
