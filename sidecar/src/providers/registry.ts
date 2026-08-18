@@ -10,6 +10,7 @@ import { AnthropicProvider } from "./anthropic.js";
 import { GeminiProvider } from "./gemini.js";
 import { DeepSeekProvider } from "./deepseek.js";
 import { OpenRouterProvider } from "./openrouter.js";
+import { GenericProvider } from "./generic.js";
 
 const registry = new Map<ProviderKind, AiProvider>([
   ["OPENAI", new OpenAiProvider()],
@@ -17,7 +18,7 @@ const registry = new Map<ProviderKind, AiProvider>([
   ["GEMINI", new GeminiProvider()],
   ["DEEPSEEK", new DeepSeekProvider()],
   ["OPENROUTER", new OpenRouterProvider()],
-  // ["GENERIC", new GenericProvider()],
+  ["GENERIC", new GenericProvider()],
 ]);
 
 export function getProvider(kind: ProviderKind): AiProvider {
