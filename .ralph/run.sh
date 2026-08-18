@@ -7,7 +7,7 @@ set -euo pipefail
 # (never empty — safe to expand under set -u even on bash 3.2, which chokes on
 # expanding a genuinely EMPTY array, not a populated one).
 SPEC_PATHS=("/Users/lucasmansoldo/Projects/ray/docs/TASKS.md" "/Users/lucasmansoldo/Projects/ray/docs/docs/SRS-Ray.md" "/Users/lucasmansoldo/Projects/ray/docs/docs/ADR-Ray.md" "/Users/lucasmansoldo/Projects/ray/docs/README.md" "/Users/lucasmansoldo/Projects/ray/.ralph/SCOPE.md")
-BRANCH_NAME="ralph/fase-2-providers"
+BRANCH_NAME="ralph/fase-3-core"
 MAX_ATTEMPTS_PER_ITEM="5"
 PER_CALL_BUDGET_USD="2"
 TOTAL_BUDGET_USD="80"
