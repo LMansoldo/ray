@@ -22,6 +22,31 @@ import {
 } from "./contract.js";
 import { prisma } from "./db.js";
 import { getProvider } from "./providers/registry.js";
+import {
+  CapabilityNotSupported,
+} from "./providers/provider.js";
+
+/**
+ * Typed error for provider/network failures.
+ * The handler maps this to IpcError code PROVIDER_UNAVAILABLE.
+ * Providers should throw this when the upstream API is unreachable or returns
+ * a transport-level error (DNS failure, TLS error, HTTP 5xx, timeout).
+ */
+export class ProviderError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderError";
+  }
+}
+
+/**
+ * Strip a secret from an error message before it crosses the IPC boundary.
+ * Never let a credential leak into an IpcError.message (ADR-003, RNF-301).
+ */
+function sanitizeSecret(message: string, secret: string): string {
+  if (!secret || !message.includes(secret)) return message;
+  return message.replaceAll(secret, "[REDACTED]");
+}
 
 // --- Provedores -------------------------------------------------------
 
@@ -34,7 +59,12 @@ export async function validateCredential(
     const r = await provider.validate(req.credential);
     return { ok: true, value: r };
   } catch (e) {
-    return ipcErr("INTERNAL", (e as Error).message);
+    const raw = (e as Error).message;
+    const message = sanitizeSecret(raw, req.credential.secret);
+    if (e instanceof ProviderError || e instanceof CapabilityNotSupported) {
+      return ipcErr("PROVIDER_UNAVAILABLE", message);
+    }
+    return ipcErr("INTERNAL", message);
   }
 }
 
