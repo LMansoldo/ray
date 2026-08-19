@@ -4,6 +4,7 @@
 pub mod audio;
 pub mod ipc;
 pub mod ipc_client;
+pub mod shortcuts;
 pub mod sidecar;
 pub mod vault;
 pub mod windows;
