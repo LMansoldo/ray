@@ -10,11 +10,11 @@ SPEC_PATHS=("/Users/lucasmansoldo/Projects/ray/docs/TASKS.md" "/Users/lucasmanso
 BRANCH_NAME="ralph/fase-3-core"
 MAX_ATTEMPTS_PER_ITEM="5"
 PER_CALL_BUDGET_USD="10"
-TOTAL_BUDGET_USD="120"
+TOTAL_BUDGET_USD="150"
 SETUP_CMD="cd sidecar && npm install"
-MODEL_LIGHT="mimo-v2.5-pro"
-MODEL_MEDIUM="mimo-v2.5-pro"
-MODEL_STRONG="deepseek-v4-pro[1m]"
+MODEL_LIGHT="claude-haiku-4-5-20251001"
+MODEL_MEDIUM="claude-sonnet-5"
+MODEL_STRONG="claude-opus-4-8"
 FULL_SUITE_CMD="cd core && cargo check && cd ../sidecar && npm run typecheck && npm test && cd .. && npx prisma validate"
 
 # CLI binary invoked per model tier. Defaults to the standard `claude` CLI
@@ -26,9 +26,9 @@ FULL_SUITE_CMD="cd core && cargo check && cd ../sidecar && npm run typecheck && 
 # unlike trying to run two differently-configured `claude` invocations inside the
 # same interactive session. light/medium here run the RED/GREEN worker stages on
 # mimo-v2.5-pro; judges (always MODEL_STRONG/CLAUDE_BIN_STRONG) stay on real opus.
-CLAUDE_BIN_LIGHT="$HOME/claude-mimo.sh"
-CLAUDE_BIN_MEDIUM="$HOME/claude-mimo.sh"
-CLAUDE_BIN_STRONG="$HOME/claude-deepseek.sh"
+CLAUDE_BIN_LIGHT="claude"
+CLAUDE_BIN_MEDIUM="claude"
+CLAUDE_BIN_STRONG="claude"
 
 RALPH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_REPO="$(cd "$RALPH_DIR/.." && pwd)"
