@@ -6,6 +6,7 @@ pub mod ipc;
 pub mod ipc_client;
 pub mod shortcuts;
 pub mod sidecar;
+pub mod stt;
 pub mod vault;
 pub mod windows;
 
@@ -48,6 +49,17 @@ fn toggle_window(window_label: String) {
 /// Usado como `fn` pointer injetável em `ipc_client::post_suggest_to_sidecar`.
 fn vault_resolve(secret_ref: &str) -> Result<String, String> {
     vault::get_secret(secret_ref).map_err(|e| e.to_string())
+}
+
+/// Drena a fila de PCM (T-306) e processa via motor STT (T-307).
+/// Retorna os segmentos de transcrição prontos (janela deslizante).
+/// Chamado periodicamente pelo loop de captura de áudio.
+#[tauri::command]
+fn transcribe_pending_pcm(
+    speaker: ipc::Speaker,
+    session_id: String,
+) -> Result<Vec<ipc::AppendTranscriptRequest>, String> {
+    stt::drain_and_process(speaker, &session_id).map_err(|e| e.to_string())
 }
 
 /// Aciona o copiloto. O núcleo resolve a credencial do cofre (vault),
@@ -255,7 +267,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             set_stealth,
             toggle_window,
-            suggest
+            suggest,
+            transcribe_pending_pcm
         ])
         .run(tauri::generate_context!())
         .expect("error while running Ray");

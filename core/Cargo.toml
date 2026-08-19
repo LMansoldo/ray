@@ -31,6 +31,8 @@ keyring = { version = "3", features = ["apple-native"] }
 # macOS: NSWindow FFI para stealth (sharingType) e opacidade (alphaValue).
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView"] }
+# macOS STT (ADR-007): SFSpeechRecognizer via raw objc2 + block2 for callbacks.
+block2 = "0.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["linux-native"] }
