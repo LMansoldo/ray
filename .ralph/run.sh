@@ -89,18 +89,22 @@ call_claude_structured() {
   [ -n "$allowed_tools" ] && tools_args=(--allowedTools "$allowed_tools")
   "$bin" -p "$prompt" --model "$model" --output-format json \
     --json-schema "$(cat "$schema_file")" \
-    --dangerously-skip-permissions --max-budget-usd "$PER_CALL_BUDGET_USD" \
+    --dangerously-skip-permissions \
     "${tools_args[@]+"${tools_args[@]}"}" > "$out" || true
-  record_cost "$(basename "$prompt_file")" "$(jq -r '.total_cost_usd // 0' "$out")"
+  local cost=0
+  [ -s "$out" ] && cost="$(jq -r '.total_cost_usd // 0' "$out" 2>/dev/null || echo 0)"
+  record_cost "$(basename "$prompt_file")" "$cost"
 }
 
 call_claude_free() {
   local prompt_file="$1" model="$2" out="$3" bin="${4:-claude}"
   local prompt; prompt="$(cat "$prompt_file")"
   "$bin" -p "$prompt" --model "$model" --output-format json \
-    --dangerously-skip-permissions --max-budget-usd "$PER_CALL_BUDGET_USD" \
+    --dangerously-skip-permissions \
     > "$out" || true
-  record_cost "$(basename "$prompt_file")" "$(jq -r '.total_cost_usd // 0' "$out")"
+  local cost=0
+  [ -s "$out" ] && cost="$(jq -r '.total_cost_usd // 0' "$out" 2>/dev/null || echo 0)"
+  record_cost "$(basename "$prompt_file")" "$cost"
 }
 
 # --- Phase 0: Setup (deterministic) ---
