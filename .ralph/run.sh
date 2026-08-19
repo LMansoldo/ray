@@ -13,7 +13,7 @@ PER_CALL_BUDGET_USD="10"
 TOTAL_BUDGET_USD="150"
 SETUP_CMD="cd sidecar && npm install"
 MODEL_LIGHT="claude-haiku-4-5-20251001"
-MODEL_MEDIUM="claude-sonnet-5"
+MODEL_MEDIUM="claude-sonnet-4-6"
 MODEL_STRONG="claude-opus-4-8"
 FULL_SUITE_CMD="cd core && cargo check && cd ../sidecar && npm run typecheck && npm test && cd .. && npx prisma validate"
 
