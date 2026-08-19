@@ -20,18 +20,28 @@ ts-rs = "10"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 tokio = { version = "1", features = ["full"] }
 thiserror = "2"
+# Raw window handle para FFI nativo de janelas (ADR-008).
+raw-window-handle = "0.6"
 
 # Cofre de credenciais nativo por plataforma (ADR-003).
 # Features por SO: apple-native (macOS), linux-native (Linux), windows-native (Windows).
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
+# macOS: NSWindow FFI para stealth (sharingType) e opacidade (alphaValue).
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["linux-native"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
+# Windows: user32/gdi32 FFI para stealth (SetWindowDisplayAffinity) e opacidade.
+windows-sys = { version = "0.59", features = [
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
