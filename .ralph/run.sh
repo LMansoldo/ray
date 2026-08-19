@@ -9,7 +9,7 @@ set -euo pipefail
 SPEC_PATHS=("/Users/lucasmansoldo/Projects/ray/docs/TASKS.md" "/Users/lucasmansoldo/Projects/ray/docs/docs/SRS-Ray.md" "/Users/lucasmansoldo/Projects/ray/docs/docs/ADR-Ray.md" "/Users/lucasmansoldo/Projects/ray/docs/README.md" "/Users/lucasmansoldo/Projects/ray/.ralph/SCOPE.md")
 BRANCH_NAME="ralph/fase-3-core"
 MAX_ATTEMPTS_PER_ITEM="5"
-PER_CALL_BUDGET_USD="2"
+PER_CALL_BUDGET_USD="10"
 TOTAL_BUDGET_USD="80"
 SETUP_CMD="cd sidecar && npm install"
 MODEL_LIGHT="mimo-v2.5-pro"
@@ -90,8 +90,8 @@ call_claude_structured() {
   "$bin" -p "$prompt" --model "$model" --output-format json \
     --json-schema "$(cat "$schema_file")" \
     --dangerously-skip-permissions --max-budget-usd "$PER_CALL_BUDGET_USD" \
-    "${tools_args[@]+"${tools_args[@]}"}" > "$out"
-  record_cost "$(basename "$prompt_file")" "$(jq '.total_cost_usd' "$out")"
+    "${tools_args[@]+"${tools_args[@]}"}" > "$out" || true
+  record_cost "$(basename "$prompt_file")" "$(jq -r '.total_cost_usd // 0' "$out")"
 }
 
 call_claude_free() {
@@ -99,8 +99,8 @@ call_claude_free() {
   local prompt; prompt="$(cat "$prompt_file")"
   "$bin" -p "$prompt" --model "$model" --output-format json \
     --dangerously-skip-permissions --max-budget-usd "$PER_CALL_BUDGET_USD" \
-    > "$out"
-  record_cost "$(basename "$prompt_file")" "$(jq '.total_cost_usd' "$out")"
+    > "$out" || true
+  record_cost "$(basename "$prompt_file")" "$(jq -r '.total_cost_usd // 0' "$out")"
 }
 
 # --- Phase 0: Setup (deterministic) ---
