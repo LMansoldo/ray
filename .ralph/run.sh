@@ -2,36 +2,23 @@
 set -euo pipefail
 
 # --- Generation-time values (substituted by the ralph-loop skill at scaffold time) ---
-# One or more spec files — {{SPEC_PATHS}} is substituted as a quoted, space-separated
+# One or more spec files — "/Users/lucasmansoldo/Projects/ray/docs/TASKS.md" "/Users/lucasmansoldo/Projects/ray/docs/docs/SRS-Ray.md" "/Users/lucasmansoldo/Projects/ray/docs/docs/ADR-Ray.md" "/Users/lucasmansoldo/Projects/ray/docs/README.md" is substituted as a quoted, space-separated
 # list (e.g. "/path/one.md" "/path/two.md"), so this array always has >=1 element
 # (never empty — safe to expand under set -u even on bash 3.2, which chokes on
 # expanding a genuinely EMPTY array, not a populated one).
-SPEC_PATHS=("/Users/lucasmansoldo/Projects/ray/docs/TASKS.md" "/Users/lucasmansoldo/Projects/ray/docs/docs/SRS-Ray.md" "/Users/lucasmansoldo/Projects/ray/docs/docs/ADR-Ray.md" "/Users/lucasmansoldo/Projects/ray/docs/README.md" "/Users/lucasmansoldo/Projects/ray/.ralph/SCOPE.md")
-BRANCH_NAME="ralph/fase-3-core"
+SPEC_PATHS=("/Users/lucasmansoldo/Projects/ray/docs/TASKS.md" "/Users/lucasmansoldo/Projects/ray/docs/docs/SRS-Ray.md" "/Users/lucasmansoldo/Projects/ray/docs/docs/ADR-Ray.md" "/Users/lucasmansoldo/Projects/ray/docs/README.md")
+BRANCH_NAME="ralph/fase-4-ui"
 MAX_ATTEMPTS_PER_ITEM="5"
-PER_CALL_BUDGET_USD="10"
+PER_CALL_BUDGET_USD="50"
 TOTAL_BUDGET_USD="150"
-SETUP_CMD="cd sidecar && npm install"
+SETUP_CMD="cd apps/ui && npm install"
 MODEL_LIGHT="claude-haiku-4-5-20251001"
 MODEL_MEDIUM="claude-sonnet-4-6"
 MODEL_STRONG="claude-opus-4-8"
-FULL_SUITE_CMD="cd core && cargo check && cd ../sidecar && npm run typecheck && npm test && cd .. && npx prisma validate"
-
-# CLI binary invoked per model tier. Defaults to the standard `claude` CLI
-# (Anthropic auth). A tier can instead point at a wrapper script that exports its
-# own ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN/ANTHROPIC_MODEL to run that tier's
-# calls against a different backend — e.g. `claude-mimo.sh`, which points Claude
-# Code at a Xiaomi MiMo-compatible endpoint. This works because every call below
-# is spawned as its own subprocess: distinct env vars per tier never collide,
-# unlike trying to run two differently-configured `claude` invocations inside the
-# same interactive session. light/medium here run the RED/GREEN worker stages on
-# mimo-v2.5-pro; judges (always MODEL_STRONG/CLAUDE_BIN_STRONG) stay on real opus.
-CLAUDE_BIN_LIGHT="claude"
-CLAUDE_BIN_MEDIUM="claude"
-CLAUDE_BIN_STRONG="claude"
+FULL_SUITE_CMD="cd apps/ui && npm run check"
 
 # Clear any leftover custom-endpoint env vars from wrapper scripts (e.g. claude-mimo.sh)
-# so the standard claude binary uses its own auth, not a stale third-party token.
+# so the standard claude binary uses its own session auth, not a stale third-party token.
 unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL
 
 RALPH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,6 +35,19 @@ MEMORY_DIR="$STATE_DIR/memory"
 
 fail() { echo "ABORT: $1" >&2; exit 1; }
 
+# Append one JSONL event to events.jsonl for ralph-watch to consume.
+# Usage: emit_event TYPE [JSON_EXTRA_OBJECT]
+# JSON_EXTRA_OBJECT must be a valid JSON object (build it with jq to ensure correct escaping).
+# Failures are silenced so a broken emit never aborts the run.
+emit_event() {
+  local type="$1" extra="${2:-{}}"
+  jq -cn \
+    --arg e "$type" \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson x "$extra" \
+    '$x + {event:$e, ts:$ts}' >> "$STATE_DIR/events.jsonl" 2>/dev/null || true
+}
+
 record_cost() {
   local phase="$1" cost="$2"
   node -e "
@@ -63,6 +63,7 @@ record_cost() {
   if awk -v t="$total" -v cap="$TOTAL_BUDGET_USD" 'BEGIN { exit !(t > cap) }'; then
     fail "total run budget exceeded (\$$total > \$$TOTAL_BUDGET_USD) — see $STATE_DIR/cost.json"
   fi
+  emit_event "cost_update" "$(jq -cn --arg u "$total" '{total_usd:($u|tonumber)}')"
 }
 
 # Writes one progress.json entry. Passes free-text (item ids, judge findings) through
@@ -87,11 +88,11 @@ write_progress() {
 }
 
 call_claude_structured() {
-  local prompt_file="$1" model="$2" schema_file="$3" allowed_tools="$4" out="$5" bin="${6:-claude}"
+  local prompt_file="$1" model="$2" schema_file="$3" allowed_tools="$4" out="$5"
   local prompt; prompt="$(cat "$prompt_file")"
   local tools_args=()
   [ -n "$allowed_tools" ] && tools_args=(--allowedTools "$allowed_tools")
-  "$bin" -p "$prompt" --model "$model" --output-format json \
+  claude -p "$prompt" --model "$model" --output-format json \
     --json-schema "$(cat "$schema_file")" \
     --dangerously-skip-permissions \
     "${tools_args[@]+"${tools_args[@]}"}" > "$out" || true
@@ -101,9 +102,9 @@ call_claude_structured() {
 }
 
 call_claude_free() {
-  local prompt_file="$1" model="$2" out="$3" bin="${4:-claude}"
+  local prompt_file="$1" model="$2" out="$3"
   local prompt; prompt="$(cat "$prompt_file")"
-  "$bin" -p "$prompt" --model "$model" --output-format json \
+  claude -p "$prompt" --model "$model" --output-format json \
     --dangerously-skip-permissions \
     > "$out" || true
   local cost=0
@@ -167,6 +168,18 @@ if [ -n "$SETUP_CMD" ]; then
 fi
 
 [ -f "$STATE_DIR/cost.json" ] || echo '{"totalCostUsd": 0, "calls": []}' > "$STATE_DIR/cost.json"
+touch "$STATE_DIR/events.jsonl"
+
+emit_event "run_start" "$(jq -cn \
+  --arg branch "$BRANCH_NAME" \
+  --argjson max_attempts "$MAX_ATTEMPTS_PER_ITEM" \
+  --argjson budget_usd "$TOTAL_BUDGET_USD" \
+  '{branch:$branch, max_attempts:$max_attempts, budget_usd:$budget_usd}')"
+
+echo ""
+echo "Watch progress in a second terminal:"
+echo "  python $RALPH_DIR/watch.py $STATE_DIR/events.jsonl"
+echo ""
 
 # All remaining work (Contract phase onward) must happen with the worktree as cwd, not
 # $SOURCE_REPO. Every `claude -p` call below inherits this shell's cwd as its own
@@ -192,12 +205,14 @@ cd "$WORKTREE_DIR"
 #   output file is missing, regardless of whether contract.json was just generated or
 #   already existed — so a run interrupted after any one of the three artifacts resumes
 #   by producing only the remaining ones.
+emit_event "phase_start" '{"phase":"contract","label":"Phase 1: Contract"}'
+
 if [ ! -f "$STATE_DIR/contract.json" ]; then
   CONTRACT_PROMPT="$STATE_DIR/rendered-contract-prompt.md"
   sed "s|{{SPECS_DIR}}|$SPECS_DIR|g" "$PROMPTS/contract-prompt.md" > "$CONTRACT_PROMPT"
 
   CONTRACT_RAW="$STATE_DIR/contract-raw.json"
-  call_claude_structured "$CONTRACT_PROMPT" "$MODEL_STRONG" "$SCHEMAS/contract.schema.json" "" "$CONTRACT_RAW" "$CLAUDE_BIN_STRONG"
+  call_claude_structured "$CONTRACT_PROMPT" "$MODEL_STRONG" "$SCHEMAS/contract.schema.json" "" "$CONTRACT_RAW"
   jq '.structured_output' "$CONTRACT_RAW" > "$STATE_DIR/contract.json"
 
   node "$SCRIPTS/validate-coverage.mjs" "$STATE_DIR/contract.json" "$STATE_DIR/CONTRACT-FAILED.md" \
@@ -231,7 +246,19 @@ else
   echo "progress.json already exists — resuming Phase 2."
 fi
 
+ITEM_COUNT="$(jq '.items | length' "$STATE_DIR/contract.json")"
+emit_event "items_loaded" "$(jq -cn \
+  --argjson contract "$(cat "$STATE_DIR/contract.json")" \
+  '{
+    count: ($contract.items | length),
+    ids: [$contract.items[].id],
+    titles: ($contract.items | map({key:.id, value:.title}) | from_entries)
+  }')"
+emit_event "phase_end" "$(jq -cn --arg n "$ITEM_COUNT" '{phase:"contract", summary:("\($n) items")}')"
+
 # --- Phase 2: Implement (ralph loop, per item, sequential in order.json order) ---
+emit_event "phase_start" '{"phase":"implement","label":"Phase 2: Implement"}'
+
 # Portable read-loop instead of `mapfile` — macOS ships bash 3.2 (Apple stopped
 # updating bash at the last GPLv2 release), which lacks the `mapfile`/`readarray`
 # builtin entirely (added in bash 4.0). `#!/usr/bin/env bash` resolves to that same
@@ -247,19 +274,21 @@ for ITEM_ID in "${ORDER[@]:-}"; do
   EXISTING_STATUS="$(jq -r --arg id "$ITEM_ID" '.[$id].status' "$STATE_DIR/progress.json")"
   if [ "$EXISTING_STATUS" != "PENDING" ]; then
     echo "SKIP (already $EXISTING_STATUS) $ITEM_ID"
+    # Re-emit item_done so the watcher reconstructs state correctly on resume.
+    EXISTING_ATTEMPTS="$(jq -r --arg id "$ITEM_ID" '.[$id].attempts' "$STATE_DIR/progress.json")"
+    EXISTING_SHA="$(jq -r --arg id "$ITEM_ID" '.[$id].commitSha // ""' "$STATE_DIR/progress.json")"
+    emit_event "item_done" "$(jq -cn \
+      --arg id "$ITEM_ID" --arg status "$EXISTING_STATUS" \
+      --arg attempts "$EXISTING_ATTEMPTS" --arg sha "$EXISTING_SHA" \
+      '{id:$id, status:$status, attempts:($attempts|tonumber), sha:$sha}')"
     continue
   fi
 
   ITEM_JSON="$STATE_DIR/item-$ITEM_ID.json"
   jq --arg id "$ITEM_ID" '.items[] | select(.id == $id)' "$STATE_DIR/contract.json" > "$ITEM_JSON"
+  ITEM_TITLE="$(jq -r '.title' "$ITEM_JSON")"
   ITEM_MODEL_TIER="$(jq -r '.model' "$ITEM_JSON")"
-  if [ "$ITEM_MODEL_TIER" = "light" ]; then
-    ITEM_MODEL="$MODEL_LIGHT"
-    ITEM_BIN="$CLAUDE_BIN_LIGHT"
-  else
-    ITEM_MODEL="$MODEL_MEDIUM"
-    ITEM_BIN="$CLAUDE_BIN_MEDIUM"
-  fi
+  if [ "$ITEM_MODEL_TIER" = "light" ]; then ITEM_MODEL="$MODEL_LIGHT"; else ITEM_MODEL="$MODEL_MEDIUM"; fi
 
   DEPS=()
   while IFS= read -r line; do
@@ -277,6 +306,9 @@ for ITEM_ID in "${ORDER[@]:-}"; do
   if [ -n "$SKIP_DUE_TO" ]; then
     write_progress "$ITEM_ID" "SKIPPED" 0 "" "dependency $SKIP_DUE_TO is BLOCKED or SKIPPED"
     echo "SKIPPED $ITEM_ID (dependency $SKIP_DUE_TO not completed)"
+    emit_event "item_done" "$(jq -cn \
+      --arg id "$ITEM_ID" --arg reason "dependency $SKIP_DUE_TO is BLOCKED or SKIPPED" \
+      '{id:$id, status:"SKIPPED", attempts:0, sha:"", skip_reason:$reason}')"
     continue
   fi
 
@@ -285,49 +317,72 @@ for ITEM_ID in "${ORDER[@]:-}"; do
   PREVIOUS_FEEDBACK="(none — first attempt)"
   RED_STAGE=true
 
+  emit_event "item_start" "$(jq -cn \
+    --arg id "$ITEM_ID" --arg title "$ITEM_TITLE" --argjson attempt "$ATTEMPT" \
+    '{id:$id, title:$title, attempt:$attempt}')"
+
   while [ "$ATTEMPT" -le "$MAX_ATTEMPTS_PER_ITEM" ]; do
     EXTRA_VALUES="$STATE_DIR/extra-$ITEM_ID-$ATTEMPT.json"
     jq -n --arg attempt "$ATTEMPT" --arg feedback "$PREVIOUS_FEEDBACK" --arg suite "$FULL_SUITE_CMD" --arg memory "$MEMORY_DIR" \
       '{ATTEMPT_NUMBER: $attempt, PREVIOUS_FEEDBACK: $feedback, FULL_SUITE_CMD: $suite, MEMORY_PATH: $memory}' > "$EXTRA_VALUES"
 
     if [ "$RED_STAGE" = true ]; then
+      emit_event "step_start" "$(jq -cn --arg id "$ITEM_ID" --argjson attempt "$ATTEMPT" '{id:$id, step:"red", attempt:$attempt}')"
       RED_PROMPT="$STATE_DIR/rendered-$ITEM_ID-$ATTEMPT-red.md"
       node "$SCRIPTS/render-prompt.mjs" "$PROMPTS/worker-red-prompt.md" "$ITEM_JSON" "$EXTRA_VALUES" > "$RED_PROMPT"
-      call_claude_free "$RED_PROMPT" "$ITEM_MODEL" "$STATE_DIR/out-$ITEM_ID-$ATTEMPT-red.json" "$ITEM_BIN"
+      call_claude_free "$RED_PROMPT" "$ITEM_MODEL" "$STATE_DIR/out-$ITEM_ID-$ATTEMPT-red.json"
 
+      emit_event "step_start" "$(jq -cn --arg id "$ITEM_ID" --argjson attempt "$ATTEMPT" '{id:$id, step:"judge_red", attempt:$attempt}')"
       JUDGE_B_PROMPT="$STATE_DIR/rendered-$ITEM_ID-$ATTEMPT-judgeB.md"
       node "$SCRIPTS/render-prompt.mjs" "$PROMPTS/judge-review-tests-prompt.md" "$ITEM_JSON" "$EXTRA_VALUES" > "$JUDGE_B_PROMPT"
       JUDGE_B_OUT="$STATE_DIR/out-$ITEM_ID-$ATTEMPT-judgeB.json"
-      call_claude_structured "$JUDGE_B_PROMPT" "$MODEL_STRONG" "$SCHEMAS/judge-verdict.schema.json" "Read,Grep,Glob,Bash" "$JUDGE_B_OUT" "$CLAUDE_BIN_STRONG"
+      call_claude_structured "$JUDGE_B_PROMPT" "$MODEL_STRONG" "$SCHEMAS/judge-verdict.schema.json" "Read,Grep,Glob,Bash" "$JUDGE_B_OUT"
       VERDICT_B="$(jq -r '.structured_output.verdict' "$JUDGE_B_OUT")"
+      SUMMARY_B="$(jq -r '.structured_output.testOutputSummary' "$JUDGE_B_OUT")"
+      emit_event "judge_verdict" "$(jq -cn \
+        --arg id "$ITEM_ID" --arg verdict "$VERDICT_B" --arg summary "$SUMMARY_B" --argjson attempt "$ATTEMPT" \
+        '{id:$id, step:"red", verdict:$verdict, summary:$summary, attempt:$attempt}')"
 
       if [ "$VERDICT_B" = "REJECT" ]; then
         PREVIOUS_FEEDBACK="$(jq -r '.structured_output.findings | map(.issue) | join("; ")' "$JUDGE_B_OUT")"
         ATTEMPT=$((ATTEMPT + 1))
+        emit_event "item_start" "$(jq -cn \
+          --arg id "$ITEM_ID" --arg title "$ITEM_TITLE" --argjson attempt "$ATTEMPT" \
+          '{id:$id, title:$title, attempt:$attempt}')"
         continue
       fi
       RED_STAGE=false
     fi
 
+    emit_event "step_start" "$(jq -cn --arg id "$ITEM_ID" --argjson attempt "$ATTEMPT" '{id:$id, step:"green", attempt:$attempt}')"
     GREEN_PROMPT="$STATE_DIR/rendered-$ITEM_ID-$ATTEMPT-green.md"
     node "$SCRIPTS/render-prompt.mjs" "$PROMPTS/worker-green-prompt.md" "$ITEM_JSON" "$EXTRA_VALUES" > "$GREEN_PROMPT"
-    call_claude_free "$GREEN_PROMPT" "$ITEM_MODEL" "$STATE_DIR/out-$ITEM_ID-$ATTEMPT-green.json" "$ITEM_BIN"
+    call_claude_free "$GREEN_PROMPT" "$ITEM_MODEL" "$STATE_DIR/out-$ITEM_ID-$ATTEMPT-green.json"
 
+    emit_event "step_start" "$(jq -cn --arg id "$ITEM_ID" --argjson attempt "$ATTEMPT" '{id:$id, step:"judge_green", attempt:$attempt}')"
     JUDGE_D_PROMPT="$STATE_DIR/rendered-$ITEM_ID-$ATTEMPT-judgeD.md"
     node "$SCRIPTS/render-prompt.mjs" "$PROMPTS/judge-final-review-prompt.md" "$ITEM_JSON" "$EXTRA_VALUES" > "$JUDGE_D_PROMPT"
     JUDGE_D_OUT="$STATE_DIR/out-$ITEM_ID-$ATTEMPT-judgeD.json"
-    call_claude_structured "$JUDGE_D_PROMPT" "$MODEL_STRONG" "$SCHEMAS/judge-verdict.schema.json" "Read,Grep,Glob,Bash" "$JUDGE_D_OUT" "$CLAUDE_BIN_STRONG"
+    call_claude_structured "$JUDGE_D_PROMPT" "$MODEL_STRONG" "$SCHEMAS/judge-verdict.schema.json" "Read,Grep,Glob,Bash" "$JUDGE_D_OUT"
     VERDICT_D="$(jq -r '.structured_output.verdict' "$JUDGE_D_OUT")"
+    SUMMARY_D="$(jq -r '.structured_output.testOutputSummary' "$JUDGE_D_OUT")"
+    emit_event "judge_verdict" "$(jq -cn \
+      --arg id "$ITEM_ID" --arg verdict "$VERDICT_D" --arg summary "$SUMMARY_D" --argjson attempt "$ATTEMPT" \
+      '{id:$id, step:"green", verdict:$verdict, summary:$summary, attempt:$attempt}')"
 
     if [ "$VERDICT_D" = "REJECT" ]; then
       PREVIOUS_FEEDBACK="$(jq -r '.structured_output.findings | map(.issue) | join("; ")' "$JUDGE_D_OUT")"
       ATTEMPT=$((ATTEMPT + 1))
+      emit_event "item_start" "$(jq -cn \
+        --arg id "$ITEM_ID" --arg title "$ITEM_TITLE" --argjson attempt "$ATTEMPT" \
+        '{id:$id, title:$title, attempt:$attempt}')"
       continue
     fi
 
     # Step E: commit (deterministic). Any file changed outside item.files was already
     # gated by judge D's scopeExpansionJustified check above — collect it here so the
     # justified regression fix actually gets committed alongside this item.
+    emit_event "step_start" "$(jq -cn --arg id "$ITEM_ID" --argjson attempt "$ATTEMPT" '{id:$id, step:"commit", attempt:$attempt}')"
     EXTRA_FILES="$STATE_DIR/extra-files-$ITEM_ID.json"
     node -e "
       const { execFileSync } = require('node:child_process');
@@ -343,11 +398,17 @@ for ITEM_ID in "${ORDER[@]:-}"; do
       SHA="$(jq -r '.sha' "$COMMIT_OUT")"
       write_progress "$ITEM_ID" "COMPLETED" "$ATTEMPT" "$SHA" ""
       echo "COMPLETED $ITEM_ID ($SHA)"
+      emit_event "item_done" "$(jq -cn \
+        --arg id "$ITEM_ID" --arg sha "$SHA" --argjson attempts "$ATTEMPT" \
+        '{id:$id, status:"COMPLETED", attempts:$attempts, sha:$sha}')"
       ITEM_DONE=true
       break
     else
       PREVIOUS_FEEDBACK="commit/hook failed: $(jq -r '.stderr' "$COMMIT_OUT")"
       ATTEMPT=$((ATTEMPT + 1))
+      emit_event "item_start" "$(jq -cn \
+        --arg id "$ITEM_ID" --arg title "$ITEM_TITLE" --argjson attempt "$ATTEMPT" \
+        '{id:$id, title:$title, attempt:$attempt}')"
       continue
     fi
   done
@@ -355,16 +416,33 @@ for ITEM_ID in "${ORDER[@]:-}"; do
   if [ "$ITEM_DONE" != true ]; then
     write_progress "$ITEM_ID" "BLOCKED" "$MAX_ATTEMPTS_PER_ITEM" "" "$PREVIOUS_FEEDBACK"
     echo "BLOCKED $ITEM_ID after $MAX_ATTEMPTS_PER_ITEM attempts"
+    emit_event "item_done" "$(jq -cn \
+      --arg id "$ITEM_ID" --argjson attempts "$MAX_ATTEMPTS_PER_ITEM" --arg reason "$PREVIOUS_FEEDBACK" \
+      '{id:$id, status:"BLOCKED", attempts:$attempts, sha:"", block_reason:$reason}')"
   fi
 done
 
+COMPLETED_COUNT="$(jq '[.[] | select(.status=="COMPLETED")] | length' "$STATE_DIR/progress.json")"
+BLOCKED_COUNT="$(jq '[.[] | select(.status=="BLOCKED")] | length' "$STATE_DIR/progress.json")"
+emit_event "phase_end" "$(jq -cn \
+  --arg c "$COMPLETED_COUNT" --arg b "$BLOCKED_COUNT" \
+  '{phase:"implement", summary:("\($c) completed, \($b) blocked")}')"
+
 # --- Phase 2.5: Final integration pass (deterministic) ---
+emit_event "phase_start" '{"phase":"integration","label":"Phase 2.5: Integration"}'
 INTEGRATION_OUT="$STATE_DIR/integration-result.json"
 node "$SCRIPTS/run-full-suite.mjs" "$WORKTREE_DIR" "$FULL_SUITE_CMD" > "$INTEGRATION_OUT" || true
+INTEGRATION_SUMMARY="$(jq -r 'if .passed then "passed" else "failed" end' "$INTEGRATION_OUT" 2>/dev/null || echo "done")"
+emit_event "phase_end" "$(jq -cn --arg s "$INTEGRATION_SUMMARY" '{phase:"integration", summary:$s}')"
 
 # --- Phase 3: Report (deterministic) ---
+emit_event "phase_start" '{"phase":"report","label":"Phase 3: Report"}'
 node "$SCRIPTS/generate-report.mjs" "$STATE_DIR/contract.json" "$STATE_DIR/progress.json" \
   "$INTEGRATION_OUT" "$STATE_DIR/cost.json" "$STATE_DIR/REPORT.md"
+emit_event "phase_end" '{"phase":"report","summary":""}'
+
+FINAL_COST="$(jq '.totalCostUsd' "$STATE_DIR/cost.json")"
+emit_event "run_done" "$(jq -cn --arg c "$FINAL_COST" '{status:"success", cost_usd:($c|tonumber)}')"
 
 echo ""
 echo "Done. Report: $STATE_DIR/REPORT.md"
