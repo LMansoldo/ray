@@ -12,14 +12,11 @@ MAX_ATTEMPTS_PER_ITEM="5"
 PER_CALL_BUDGET_USD="50"
 TOTAL_BUDGET_USD="150"
 SETUP_CMD="cd apps/ui && npm install"
-MODEL_LIGHT="claude-haiku-4-5-20251001"
-MODEL_MEDIUM="claude-sonnet-4-6"
-MODEL_STRONG="claude-opus-4-8"
+MODEL_LIGHT="deepseek-v4-flash"
+MODEL_MEDIUM="deepseek-v4-pro[1m]"
+MODEL_STRONG="deepseek-v4-pro[1m]"
 FULL_SUITE_CMD="cd apps/ui && npm run check"
-
-# Clear any leftover custom-endpoint env vars from wrapper scripts (e.g. claude-mimo.sh)
-# so the standard claude binary uses its own session auth, not a stale third-party token.
-unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL
+CLAUDE_BIN="$HOME/claude-deepseek.sh"
 
 RALPH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_REPO="$(cd "$RALPH_DIR/.." && pwd)"
@@ -92,7 +89,7 @@ call_claude_structured() {
   local prompt; prompt="$(cat "$prompt_file")"
   local tools_args=()
   [ -n "$allowed_tools" ] && tools_args=(--allowedTools "$allowed_tools")
-  claude -p "$prompt" --model "$model" --output-format json \
+  "$CLAUDE_BIN" -p "$prompt" --model "$model" --output-format json \
     --json-schema "$(cat "$schema_file")" \
     --dangerously-skip-permissions \
     "${tools_args[@]+"${tools_args[@]}"}" > "$out" || true
@@ -104,7 +101,7 @@ call_claude_structured() {
 call_claude_free() {
   local prompt_file="$1" model="$2" out="$3"
   local prompt; prompt="$(cat "$prompt_file")"
-  claude -p "$prompt" --model "$model" --output-format json \
+  "$CLAUDE_BIN" -p "$prompt" --model "$model" --output-format json \
     --dangerously-skip-permissions \
     > "$out" || true
   local cost=0

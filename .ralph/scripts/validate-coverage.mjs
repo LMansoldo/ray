@@ -8,7 +8,13 @@ export function findOrphans(coverageMap) {
 
 if (process.argv[1] && process.argv[1].endsWith('validate-coverage.mjs')) {
   const [, , contractPath, failReportPath] = process.argv;
-  const contract = JSON.parse(readFileSync(contractPath, 'utf8'));
+  const raw = JSON.parse(readFileSync(contractPath, 'utf8'));
+  const contract = raw?.structured_output ?? raw;
+  if (!contract || !contract.coverageMap) {
+    writeFileSync(failReportPath, '# Contract Failed\n\nContract output is null or missing coverageMap — the LLM returned an error response. Re-run the loop.\n');
+    console.error('Coverage FAILED: contract is null or missing coverageMap.');
+    process.exit(1);
+  }
   const orphans = findOrphans(contract.coverageMap);
 
   if (orphans.length === 0) {
