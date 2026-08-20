@@ -37,7 +37,9 @@ fail() { echo "ABORT: $1" >&2; exit 1; }
 # JSON_EXTRA_OBJECT must be a valid JSON object (build it with jq to ensure correct escaping).
 # Failures are silenced so a broken emit never aborts the run.
 emit_event() {
-  local type="$1" extra="${2:-{}}"
+  local type="$1"
+  local extra='{}'
+  [ -n "${2-}" ] && extra="$2"
   jq -cn \
     --arg e "$type" \
     --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
