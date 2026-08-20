@@ -35,7 +35,7 @@ Read `.claude/rules/frontend.md` and `.claude/rules/general.md` before generatin
 - **No emojis** in UI or code/comments.
 - **`rem` over `px`** for new styles (10px = 1rem).
 - **Liquid Glass design system** lives in `apps/ui/src/lib/glass/` — reuse before creating new primitives.
-- **i18n**: RNF-502 requires PT and EN — do not pick a translation library silently; flag if adding the first user-facing string.
+- **i18n**: RNF-502 is deferred. All Fase 4 user-facing strings are hardcoded in PT-BR. No translation library, no key convention, no en.json. The contract phase must NOT surface this as an uncovered requirement — it is intentionally out of scope for this run.
 - **No icon library chosen yet** — check existing imports before adding one.
 
 **Test strategy:**
