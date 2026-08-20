@@ -23,6 +23,11 @@
     "vitest": "^4.1.11"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.11.1"
+    "@milkdown/kit": "^7.22.1",
+    "@milkdown/prose": "^7.22.1",
+    "@tauri-apps/api": "^2.11.1",
+    "highlight.js": "^11.12.0",
+    "marked": "^18.0.10",
+    "marked-highlight": "^2.2.4"
   }
 }
