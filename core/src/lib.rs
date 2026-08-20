@@ -106,6 +106,22 @@ fn suggest(req: SuggestRequest) -> Result<(), String> {
     }
 }
 
+/// Implementação interna injetável do comando `suggest`.
+///
+/// Separa a lógica SSE do AppHandle de Tauri para permitir testes sem runtime Tauri.
+/// O `#[tauri::command] fn suggest` delegará a esta função com um `TauriEmitter`
+/// (que chama `app.emit()`) no passo GREEN do T-303.
+///
+/// `emitter` recebe cada `SuggestStreamEvent` assim que parseado (sem bufferizar),
+/// satisfazendo RNF-102 e a ordem `start → token* → done/error` (ADR-005, T-102).
+pub(crate) async fn suggest_with_emitter<E: ipc_client::SuggestEventEmitter>(
+    req: SuggestRequest,
+    base_url: &str,
+    emitter: E,
+) -> Result<(), String> {
+    todo!("T-303: wire suggest_with_emitter to stream_suggest_events")
+}
+
 // ── Testes do comando suggest (T-302) ──────────────────────────────────
 // Valida que o comando Tauri `suggest`:
 //   1. Propaga erros do vault como Err(String), discriminando do stub
@@ -232,7 +248,75 @@ mod tests {
         }
     }
 
-    // ── (c) erro de sugest NUNCA vaza o segredo (ADR-003, CA-4) ──────
+    // ── (c) suggest_with_emitter delega ao bridge SSE ────────────────
+    // Pina que o comando suggest passa pelo stream_suggest_events (e não pelo
+    // post_suggest_to_sidecar não-streaming).
+    //
+    // RED: suggest_with_emitter é todo!() → panic → FAILED com "T-303".
+    // GREEN: suggest_with_emitter chama stream_suggest_events; o emitter recebe
+    // pelo menos um evento do servidor fake e o assert passa.
+    #[tokio::test]
+    async fn suggest_delegates_to_sse_streaming() {
+        use std::io::{Read, Write};
+        use std::sync::{Arc, Mutex};
+
+        struct TestEmitter(Arc<Mutex<Vec<SuggestStreamEvent>>>);
+        impl crate::ipc_client::SuggestEventEmitter for TestEmitter {
+            fn emit_event(&self, event: SuggestStreamEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::<SuggestStreamEvent>::new()));
+        let emitter = TestEmitter(captured.clone());
+
+        // Minimal SSE server: sends a single Done event then closes.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let done_json = serde_json::to_string(&SuggestStreamEvent::Done {
+            provider_kind: ProviderKind::Openai,
+            model: None,
+        })
+        .unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                let body = format!("data: {}\n\n", done_json);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\n\
+                     Content-Type: text/event-stream\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(response.as_bytes());
+            }
+        });
+
+        let base_url = format!("http://127.0.0.1:{}", port);
+        let req = build_request(InjectedCredential {
+            kind: ProviderKind::Openai,
+            connection_mode: ProviderConnectionMode::ApiKey,
+            secret: "placeholder".into(),
+            base_url: None,
+            model: None,
+        });
+
+        // RED: todo!() panics → test fails with "T-303".
+        // GREEN: suggest_with_emitter calls stream_suggest_events → emitter captures events.
+        let _ = suggest_with_emitter(req, &base_url, emitter).await;
+
+        let events = captured.lock().unwrap();
+        assert!(
+            !events.is_empty(),
+            "suggest_with_emitter must delegate to stream_suggest_events \
+             and emit at least one event through the injected emitter"
+        );
+    }
+
+    // ── (d) erro de sugest NUNCA vaza o segredo (ADR-003, CA-4) ──────
     // Always-pass no RED: o stub retorna "not_implemented" que nao contem
     // o segredo. No GREEN, protege contra implementacoes que formatam o
     // segredo na mensagem de erro (ex: "falha ao injetar sk-xxx: ...").

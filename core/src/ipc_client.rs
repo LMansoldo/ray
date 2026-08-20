@@ -60,6 +60,26 @@ pub async fn post_suggest_to_sidecar(
     Ok(())
 }
 
+/// Abstração de emissão de eventos para permitir testes sem AppHandle do Tauri.
+/// A implementação real em lib.rs usa `app.emit()`; testes usam ChannelEmitter.
+pub trait SuggestEventEmitter: Send + 'static {
+    fn emit_event(&self, event: crate::ipc::SuggestStreamEvent);
+}
+
+/// Consome a resposta SSE de POST /copilot/suggest e emite cada SuggestStreamEvent
+/// via `emitter` assim que parseado. Não bufferiza — token a token (RNF-102).
+///
+/// Sequência garantida pelo sidecar (T-102): start → token* → done/error.
+/// ADR-005: transporte via SSE/chunked sobre loopback; Rust é o único cliente.
+pub async fn stream_suggest_events<E: SuggestEventEmitter>(
+    base_url: &str,
+    req: SuggestRequest,
+    resolve: fn(&str) -> Result<String, String>,
+    emitter: E,
+) -> Result<(), IpcClientError> {
+    todo!("T-303: SSE streaming bridge not yet implemented")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,5 +360,448 @@ mod tests {
             }
             Ok(()) => {}
         }
+    }
+}
+
+// ── Testes SSE (T-303) ─────────────────────────────────────────────────────
+// Valida que stream_suggest_events:
+//   (a) emite start → token* → done em ordem exata com payloads corretos
+//   (b) emite Error como último evento quando SSE fecha com erro; sem Done
+//   (c) não entra em panic quando Done chega sem Start (dado externo inválido)
+//   (d) desserializa o wire format SSE (tag "type" + camelCase) via reqwest stream
+
+#[cfg(test)]
+mod sse_tests {
+    use super::*;
+    use crate::ipc::*;
+    use std::io::{Read, Write};
+    use std::sync::mpsc;
+
+    // Channel-based emitter que captura eventos para asserções de teste.
+    struct ChannelEmitter {
+        tx: mpsc::SyncSender<SuggestStreamEvent>,
+    }
+
+    impl SuggestEventEmitter for ChannelEmitter {
+        fn emit_event(&self, event: SuggestStreamEvent) {
+            let _ = self.tx.send(event);
+        }
+    }
+
+    fn make_channel_emitter() -> (ChannelEmitter, mpsc::Receiver<SuggestStreamEvent>) {
+        let (tx, rx) = mpsc::sync_channel(64);
+        (ChannelEmitter { tx }, rx)
+    }
+
+    // Async emitter — tokio unbounded channel allows non-blocking await on recv().
+    // Required by sse_incremental_token_arrives_before_stream_completes which must
+    // NOT block the tokio executor while waiting for events.
+    struct TokioUnboundedEmitter {
+        tx: tokio::sync::mpsc::UnboundedSender<SuggestStreamEvent>,
+    }
+
+    impl SuggestEventEmitter for TokioUnboundedEmitter {
+        fn emit_event(&self, event: SuggestStreamEvent) {
+            let _ = self.tx.send(event);
+        }
+    }
+
+    fn build_sse_request() -> SuggestRequest {
+        SuggestRequest {
+            session_id: "sess-sse".into(),
+            assistant_id: "asst-sse".into(),
+            trigger: SuggestionTrigger::Auto,
+            context: vec![TranscriptContextSegment {
+                speaker: Speaker::Self_,
+                text: "context".into(),
+                start_ms: 0,
+            }],
+            user_prompt: None,
+            screenshots: None,
+            selection_text: None,
+            credential: InjectedCredential {
+                kind: ProviderKind::Openai,
+                connection_mode: ProviderConnectionMode::ApiKey,
+                secret: "placeholder".into(),
+                base_url: None,
+                model: None,
+            },
+        }
+    }
+
+    fn fake_ok_resolver(_: &str) -> Result<String, String> {
+        Ok("sk-fake-sse-test".into())
+    }
+
+    /// Spawn a fake SSE HTTP server. Binds before spawning to avoid races.
+    /// Sends each string in `event_jsons` as `data: {json}\n\n` with Content-Length.
+    fn spawn_fake_sse_server(event_jsons: Vec<String>) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            // Drain the HTTP request
+            let mut buf = vec![0u8; 8192];
+            let _ = stream.read(&mut buf);
+
+            let body: String = event_jsons
+                .into_iter()
+                .map(|json| format!("data: {}\n\n", json))
+                .collect();
+
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(headers.as_bytes());
+            let _ = stream.write_all(body.as_bytes());
+        });
+        port
+    }
+
+    /// Chunked SSE server: emite `early_events` imediatamente, aguarda `delay_ms`,
+    /// depois emite `late_events` e fecha o stream.
+    ///
+    /// `set_nodelay(true)` desativa o algoritmo de Nagle para garantir que cada
+    /// chunk seja enviado ao kernel sem esperar o buffer encher. Isso permite
+    /// ao cliente ler eventos incrementalmente antes do servidor enviar o restante.
+    ///
+    /// Uma implementação que acumula o body completo antes de parsear (buffering)
+    /// só entrega eventos depois do `delay_ms` + close — falha no timeout do teste.
+    fn spawn_chunked_sse_server_with_delay(
+        early_events: Vec<String>,
+        delay_ms: u64,
+        late_events: Vec<String>,
+    ) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            // Disable Nagle: each write_all becomes its own TCP segment.
+            stream.set_nodelay(true).ok();
+            // Drain the HTTP request.
+            let mut buf = vec![0u8; 8192];
+            let _ = stream.read(&mut buf);
+
+            // HTTP headers — chunked encoding, no Content-Length.
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\n\
+                  Content-Type: text/event-stream\r\n\
+                  Cache-Control: no-cache\r\n\
+                  Transfer-Encoding: chunked\r\n\r\n",
+            );
+
+            // Early events: flushed immediately so the client can read before delay.
+            for json in &early_events {
+                let sse = format!("data: {}\n\n", json);
+                let chunk = format!("{:x}\r\n{}\r\n", sse.len(), sse);
+                let _ = stream.write_all(chunk.as_bytes());
+            }
+
+            // Simulate latency between bursts (e.g. provider thinking time).
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+
+            // Late events.
+            for json in &late_events {
+                let sse = format!("data: {}\n\n", json);
+                let chunk = format!("{:x}\r\n{}\r\n", sse.len(), sse);
+                let _ = stream.write_all(chunk.as_bytes());
+            }
+
+            // HTTP/1.1 chunked terminator.
+            let _ = stream.write_all(b"0\r\n\r\n");
+        });
+        port
+    }
+
+    // (a) Happy path: start → token → token → done — ordem exata, payloads corretos.
+    // RNF-102: streaming token a token, sem bufferizar/achatar.
+    // ADR-005: SSE sobre loopback, Rust é o único cliente.
+    #[tokio::test]
+    async fn sse_happy_path_emits_events_in_order() {
+        let start_json = serde_json::to_string(&SuggestStreamEvent::Start {
+            suggestion_id: "sid-001".into(),
+            context_label: None,
+            they_said: None,
+        })
+        .unwrap();
+        let token1_json =
+            serde_json::to_string(&SuggestStreamEvent::Token { text: "Olá".into() }).unwrap();
+        let token2_json =
+            serde_json::to_string(&SuggestStreamEvent::Token { text: " mundo".into() }).unwrap();
+        let done_json = serde_json::to_string(&SuggestStreamEvent::Done {
+            provider_kind: ProviderKind::Openai,
+            model: Some("gpt-4o".into()),
+        })
+        .unwrap();
+
+        let port = spawn_fake_sse_server(vec![start_json, token1_json, token2_json, done_json]);
+        let base_url = format!("http://127.0.0.1:{}", port);
+        let (emitter, rx) = make_channel_emitter();
+
+        let result =
+            stream_suggest_events(&base_url, build_sse_request(), fake_ok_resolver, emitter)
+                .await;
+
+        assert!(result.is_ok(), "stream must complete without error: {:?}", result);
+
+        let events: Vec<SuggestStreamEvent> = rx.try_iter().collect();
+        assert_eq!(events.len(), 4, "must receive exactly 4 events, got {}", events.len());
+
+        match &events[0] {
+            SuggestStreamEvent::Start { suggestion_id, context_label, they_said } => {
+                assert_eq!(suggestion_id, "sid-001");
+                assert!(context_label.is_none());
+                assert!(they_said.is_none());
+            }
+            other => panic!("event[0] must be Start, got: {:?}", other),
+        }
+        match &events[1] {
+            SuggestStreamEvent::Token { text } => assert_eq!(text, "Olá"),
+            other => panic!("event[1] must be Token('Olá'), got: {:?}", other),
+        }
+        match &events[2] {
+            SuggestStreamEvent::Token { text } => assert_eq!(text, " mundo"),
+            other => panic!("event[2] must be Token(' mundo'), got: {:?}", other),
+        }
+        match &events[3] {
+            SuggestStreamEvent::Done { provider_kind, model } => {
+                assert!(matches!(provider_kind, ProviderKind::Openai));
+                assert_eq!(model.as_deref(), Some("gpt-4o"));
+            }
+            other => panic!("event[3] must be Done, got: {:?}", other),
+        }
+    }
+
+    // (b) Erro no meio do stream: start → token → SSE Error event.
+    // O último evento emitido deve ser Error; Done NUNCA deve ser emitido.
+    #[tokio::test]
+    async fn sse_error_mid_stream_last_event_is_error_no_done() {
+        let start_json = serde_json::to_string(&SuggestStreamEvent::Start {
+            suggestion_id: "sid-002".into(),
+            context_label: None,
+            they_said: None,
+        })
+        .unwrap();
+        let token_json =
+            serde_json::to_string(&SuggestStreamEvent::Token { text: "parcial".into() }).unwrap();
+        let error_json = serde_json::to_string(&SuggestStreamEvent::Error {
+            error: IpcError {
+                code: IpcErrorCode::AgentError,
+                message: "provider timeout".into(),
+                retryable: Some(true),
+            },
+        })
+        .unwrap();
+
+        let port = spawn_fake_sse_server(vec![start_json, token_json, error_json]);
+        let base_url = format!("http://127.0.0.1:{}", port);
+        let (emitter, rx) = make_channel_emitter();
+
+        let _ =
+            stream_suggest_events(&base_url, build_sse_request(), fake_ok_resolver, emitter).await;
+
+        let events: Vec<SuggestStreamEvent> = rx.try_iter().collect();
+        assert!(
+            events.len() >= 1,
+            "must receive at least one event before closing"
+        );
+
+        let last = events.last().unwrap();
+        assert!(
+            matches!(last, SuggestStreamEvent::Error { .. }),
+            "last event must be Error, got: {:?}",
+            last
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, SuggestStreamEvent::Done { .. })),
+            "Done must not be emitted after Error event"
+        );
+        match last {
+            SuggestStreamEvent::Error { error } => {
+                assert!(matches!(error.code, IpcErrorCode::AgentError));
+                assert_eq!(error.message, "provider timeout");
+                assert_eq!(error.retryable, Some(true));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    // (c) Done sem Start precedente (violação de contrato do emissor SSE).
+    // general.md: no .unwrap()/.expect() em dados externos — deve ser tratado, não panic.
+    #[tokio::test]
+    async fn sse_done_without_start_does_not_panic() {
+        let done_json = serde_json::to_string(&SuggestStreamEvent::Done {
+            provider_kind: ProviderKind::Anthropic,
+            model: None,
+        })
+        .unwrap();
+
+        let port = spawn_fake_sse_server(vec![done_json]);
+        let base_url = format!("http://127.0.0.1:{}", port);
+        let (emitter, rx) = make_channel_emitter();
+
+        // Must not panic — no .unwrap()/.expect() on external data (general.md)
+        let result =
+            stream_suggest_events(&base_url, build_sse_request(), fake_ok_resolver, emitter)
+                .await;
+
+        match result {
+            Ok(()) => {
+                // If Ok, the Done event must have been emitted (valid JSON, valid SSE)
+                let events: Vec<_> = rx.try_iter().collect();
+                assert!(
+                    !events.is_empty(),
+                    "if stream completed Ok, must have emitted at least the Done event"
+                );
+            }
+            Err(_) => {
+                // Returning Err for a contract-violating stream is also acceptable
+            }
+        }
+    }
+
+    // (d) Wire format deserialization via reqwest stream: tipos ipc.rs <-> wire SSE.
+    // Valida serde round-trip: tag "type" (snake_case) + campos camelCase, ProviderKind
+    // SCREAMING_SNAKE_CASE — exatamente o formato que o sidecar (T-102) emite.
+    #[tokio::test]
+    async fn sse_wire_format_deserialization_matches_ipc_types() {
+        let wire_events = vec![
+            r#"{"type":"start","suggestionId":"sid-xyz","contextLabel":"Reunião","theySaid":"Boa tarde"}"#.to_string(),
+            r#"{"type":"token","text":"Texto do token"}"#.to_string(),
+            r#"{"type":"done","providerKind":"ANTHROPIC","model":"claude-3-opus-20240229"}"#.to_string(),
+        ];
+
+        let port = spawn_fake_sse_server(wire_events);
+        let base_url = format!("http://127.0.0.1:{}", port);
+        let (emitter, rx) = make_channel_emitter();
+
+        let result =
+            stream_suggest_events(&base_url, build_sse_request(), fake_ok_resolver, emitter)
+                .await;
+
+        assert!(result.is_ok(), "wire format must deserialize cleanly: {:?}", result);
+
+        let events: Vec<SuggestStreamEvent> = rx.try_iter().collect();
+        assert_eq!(events.len(), 3, "must emit all 3 wire events");
+
+        match &events[0] {
+            SuggestStreamEvent::Start { suggestion_id, context_label, they_said } => {
+                assert_eq!(suggestion_id, "sid-xyz");
+                assert_eq!(context_label.as_deref(), Some("Reunião"));
+                assert_eq!(they_said.as_deref(), Some("Boa tarde"));
+            }
+            other => panic!("event[0]: expected Start, got {:?}", other),
+        }
+        match &events[1] {
+            SuggestStreamEvent::Token { text } => assert_eq!(text, "Texto do token"),
+            other => panic!("event[1]: expected Token, got {:?}", other),
+        }
+        match &events[2] {
+            SuggestStreamEvent::Done { provider_kind, model } => {
+                assert!(
+                    matches!(provider_kind, ProviderKind::Anthropic),
+                    "must be Anthropic, got {:?}",
+                    provider_kind
+                );
+                assert_eq!(model.as_deref(), Some("claude-3-opus-20240229"));
+            }
+            other => panic!("event[2]: expected Done, got {:?}", other),
+        }
+    }
+
+    // (e) Propriedade de streaming incremental (RNF-102) — o cliente NÃO bufferiza.
+    //
+    // O servidor envia start+token imediatamente via chunked encoding (sem
+    // Content-Length), depois aguarda 300ms antes de enviar done+close.
+    //
+    // Requisito: os eventos iniciais chegam ao canal em < 150ms, ANTES do
+    // servidor completar o stream.
+    //
+    // Uma implementação que acumula `.text().await` ou equivalente falha neste
+    // teste porque só entrega eventos depois do delay de 300ms expirar.
+    // Uma implementação com `bytes_stream()` + parse incremental passa.
+    #[tokio::test]
+    async fn sse_incremental_token_arrives_before_stream_completes() {
+        let start_json = serde_json::to_string(&SuggestStreamEvent::Start {
+            suggestion_id: "sid-incr".into(),
+            context_label: None,
+            they_said: None,
+        })
+        .unwrap();
+        let token_json =
+            serde_json::to_string(&SuggestStreamEvent::Token { text: "incremental".into() })
+                .unwrap();
+        let done_json = serde_json::to_string(&SuggestStreamEvent::Done {
+            provider_kind: ProviderKind::Openai,
+            model: None,
+        })
+        .unwrap();
+
+        // Server: sends start+token immediately; 300ms later sends done+close.
+        // Buffering client: receives nothing until after 300ms → recv() times out at 150ms.
+        // Streaming client: receives start+token within ~1ms → passes.
+        let port = spawn_chunked_sse_server_with_delay(
+            vec![start_json, token_json],
+            300,
+            vec![done_json],
+        );
+        let base_url = format!("http://127.0.0.1:{}", port);
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SuggestStreamEvent>();
+        let emitter = TokioUnboundedEmitter { tx };
+
+        let base_url_for_task = base_url.clone();
+        let stream_task = tokio::spawn(async move {
+            stream_suggest_events(
+                &base_url_for_task,
+                build_sse_request(),
+                fake_ok_resolver,
+                emitter,
+            )
+            .await
+        });
+
+        // start must arrive well before the 300ms server delay.
+        let got_start = tokio::time::timeout(
+            std::time::Duration::from_millis(150),
+            rx.recv(),
+        )
+        .await
+        .expect(
+            "start event must arrive within 150ms — a buffering implementation fails here \
+             because it waits for the full 300ms server delay before delivering any event",
+        )
+        .expect("channel must be open when start arrives");
+
+        // early token must also arrive within 150ms of the test starting.
+        let got_token = tokio::time::timeout(
+            std::time::Duration::from_millis(150),
+            rx.recv(),
+        )
+        .await
+        .expect(
+            "Token event must arrive within 150ms — a buffering implementation fails here \
+             because it only delivers events after the full response is received",
+        )
+        .expect("channel must be open when token arrives");
+
+        assert!(
+            matches!(got_start, SuggestStreamEvent::Start { .. }),
+            "first incremental event must be Start, got: {:?}",
+            got_start
+        );
+        assert!(
+            matches!(got_token, SuggestStreamEvent::Token { .. }),
+            "second incremental event must be Token, got: {:?}",
+            got_token
+        );
+
+        // Allow the full stream to finish (done arrives after the 300ms delay).
+        let _ = stream_task.await;
     }
 }
