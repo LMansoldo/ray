@@ -30,6 +30,10 @@ CLAUDE_BIN_LIGHT="claude"
 CLAUDE_BIN_MEDIUM="claude"
 CLAUDE_BIN_STRONG="claude"
 
+# Clear any leftover custom-endpoint env vars from wrapper scripts (e.g. claude-mimo.sh)
+# so the standard claude binary uses its own auth, not a stale third-party token.
+unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL
+
 RALPH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_REPO="$(cd "$RALPH_DIR/.." && pwd)"
 SCRIPTS="$RALPH_DIR/scripts"
