@@ -12,11 +12,14 @@ MAX_ATTEMPTS_PER_ITEM="5"
 PER_CALL_BUDGET_USD="50"
 TOTAL_BUDGET_USD="150"
 SETUP_CMD=""
-MODEL_LIGHT="deepseek-v4-flash"
-MODEL_MEDIUM="deepseek-v4-pro[1m]"
-MODEL_STRONG="deepseek-v4-pro[1m]"
+MODEL_LIGHT="claude-haiku-4-5-20251001"
+MODEL_MEDIUM="claude-sonnet-4-6"
+MODEL_STRONG="claude-opus-4-8"
 FULL_SUITE_CMD="cd core && cargo check && cd ../sidecar && npm run typecheck && npm test && cd ../apps/ui && npm run check"
-CLAUDE_BIN="$HOME/claude-deepseek.sh"
+CLAUDE_BIN="claude"
+
+# Clear any leftover custom-endpoint vars so the standard claude binary uses its own auth.
+unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL
 
 RALPH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_REPO="$(cd "$RALPH_DIR/.." && pwd)"

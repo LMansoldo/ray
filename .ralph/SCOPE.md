@@ -28,6 +28,11 @@ before generating any item's contract.
 - T-503 depends on T-001 (already done — treat as available).
 - T-500 and T-503 are independent of each other.
 
+**Important — T-501 previous failure:** The worker attempted to `git add docs/packaging.md`
+(a file it did not actually create). Do NOT create documentation files or commit files
+that do not exist on disk. Every `git add <path>` must be preceded by verifying the file
+exists. Only commit files listed in `files` that were actually written.
+
 **Critical rules for all items:**
 - No `.unwrap()`/`.expect()` on any I/O path — propagate with `?` into `Result<T, E>`.
 - Secrets never logged, never persisted outside `vault.rs` (ADR-003).
