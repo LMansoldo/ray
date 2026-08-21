@@ -91,6 +91,34 @@ Run with `--dry-run` to verify artifact naming without building:
 
 Actual signing requires `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (injected by CI — never committed). See `core/scripts/release.sh` for details.
 
+## Auto-update (T-502 / RID-4 / ADR-009)
+
+Ray uses the Tauri updater plugin (minisign signatures) for signed automatic updates.
+
+### Endpoint scheme
+
+Configured in `core/tauri.conf.json` under `plugins.updater.endpoints`:
+
+```
+https://releases.ray.app/{{target}}/{{arch}}/{{current_version}}/stable
+https://releases.ray.app/{{target}}/{{arch}}/{{current_version}}/unstable
+```
+
+Tauri substitutes `{{target}}`, `{{arch}}`, and `{{current_version}}` at runtime. Both stable and unstable channels are checked; which one applies is determined by the build.
+
+### Keypair management
+
+1. Generate once: `cargo tauri signer generate -w ~/.tauri/ray.key`
+2. Store the **public key** in `core/tauri.conf.json` (`plugins.updater.pubkey`).
+3. Store the **private key** as the `TAURI_SIGNING_PRIVATE_KEY` CI secret (base64-encoded).
+4. Sign each artifact after build: `./core/scripts/sign-release.sh <artifact-path>`
+
+The script writes `<artifact>.sig` alongside the artifact. Tauri verifies this signature before applying any update.
+
+### Audio driver update cycle
+
+The audio driver (T-500 / ADR-009) has its own separate update cycle and is NOT included in the app updater. It is distributed and signed independently.
+
 ## CI notes
 
 Full installer builds and signing run only in GitHub Actions (the dev host lacks signing certificates and cross-compilation toolchains).  

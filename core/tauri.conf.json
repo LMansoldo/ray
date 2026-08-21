@@ -36,6 +36,19 @@
     "resources": [
       "resources/whisper/whisper-main",
       "resources/whisper/ggml-tiny.bin"
-    ]
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://releases.ray.app/{{target}}/{{arch}}/{{current_version}}/stable",
+        "https://releases.ray.app/{{target}}/{{arch}}/{{current_version}}/unstable"
+      ],
+      "pubkey": "REPLACE_WITH_MINISIGN_PUBLIC_KEY",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

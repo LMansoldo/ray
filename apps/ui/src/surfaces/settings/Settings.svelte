@@ -10,6 +10,7 @@
   // nenhum comando core de settings existe ainda, e a UI nunca inventa um
   // nome de invoke() (general.md: o contrato é a fronteira). ADR-003: o
   // segredo digitado vive apenas no próprio campo e no payload credentialSave.
+  import { invoke } from '@tauri-apps/api/core'
   import { glassTokens } from '../../lib/glass/tokens'
   import { dispatchOnboardingRestart } from '../onboarding/restart'
   import type { OnboardingPermissionId, OnboardingPlatform } from '../onboarding/types'
@@ -382,11 +383,11 @@
   }
 
   function openLogFolder(): void {
-    dispatchSettingsAction({ type: 'logFolderOpen' })
+    void invoke('open_logs_folder')
   }
 
   function copyLogs(): void {
-    dispatchSettingsAction({ type: 'logCopy' })
+    void invoke('copy_logs_to_clipboard')
   }
 </script>
 
