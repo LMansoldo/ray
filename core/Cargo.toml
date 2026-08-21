@@ -22,6 +22,13 @@ tokio = { version = "1", features = ["full"] }
 thiserror = "2"
 # Raw window handle para FFI nativo de janelas (ADR-008).
 raw-window-handle = "0.6"
+# T-502: auto-update assinado (RID-4/ADR-009).
+tauri-plugin-updater = "2"
+# T-503: logging local de erros apenas (RF-1004). simplelog: zero-config file writer.
+log = "0.4"
+simplelog = "0.12"
+# Clipboard cross-platform para exportação de logs (T-503/RF-1004).
+arboard = { version = "3", default-features = false }
 
 # Cofre de credenciais nativo por plataforma (ADR-003).
 # Features por SO: apple-native (macOS), linux-native (Linux), windows-native (Windows).

@@ -4,6 +4,7 @@
 pub mod audio;
 pub mod ipc;
 pub mod ipc_client;
+pub mod logging;
 pub mod shortcuts;
 pub mod sidecar;
 pub mod stt;
@@ -343,16 +344,41 @@ mod tests {
     }
 }
 
+// ── T-503 commands — logs folder + clipboard export ──────────────────────
+
+/// Abre a pasta de logs no gerenciador de arquivos nativo (RF-1004).
+#[tauri::command]
+fn open_logs_folder(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = logging::resolve_log_dir(&app)?;
+    logging::open_folder(&dir)
+}
+
+/// Copia o conteúdo do arquivo de log para a área de transferência (RF-1004).
+/// Conteúdo de reunião NUNCA aparece aqui — apenas erros estruturais (T-503).
+#[tauri::command]
+fn copy_logs_to_clipboard(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = logging::resolve_log_dir(&app)?;
+    logging::copy_to_clipboard(&dir)
+}
+
 /// Ponto de entrada da aplicação Tauri.
 /// Registra os comandos Tauri. O sidecar é inicializado separadamente
 /// via `sidecar::Sidecar::start()` + `set_sidecar_port()`.
 pub fn run() {
+    // T-503: inicializa o logger de erros antes de qualquer outro módulo.
+    // A pasta é resolvida pelo Tauri após o builder, então usamos uma
+    // inicialização lazy em open_logs_folder / copy_logs_to_clipboard.
+
     tauri::Builder::default()
+        // T-502: plugin de auto-update assinado (RID-4 / ADR-009).
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             set_stealth,
             toggle_window,
             suggest,
-            transcribe_pending_pcm
+            transcribe_pending_pcm,
+            open_logs_folder,
+            copy_logs_to_clipboard,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Ray");
