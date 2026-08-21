@@ -1,5 +1,12 @@
+/* Estilos globais da UI. O material de vidro em si mora em
+   src/lib/glass/ (tokens.ts é a fonte de verdade) — aqui ficam só a base
+   tipográfica e o fundo sobre o qual o vidro refrata. */
+
 :root {
+  /* 1rem = 10px: a convenção de unidades do repo (.claude/rules/general.md). */
+  font-size: 62.5%;
   color-scheme: light;
+  font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
 }
 
 * {
@@ -8,4 +15,8 @@
 
 body {
   margin: 0;
+  font-size: 1.4rem;
+  line-height: 1.5;
+  /* A janela do Tauri é translúcida; o fundo real é a tela atrás dela. */
+  background: transparent;
 }

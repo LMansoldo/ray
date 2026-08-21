@@ -1,34 +1,35 @@
 <script lang="ts">
-  // Placeholder inicial da UI (T-001). As superfícies reais (app bar, home,
-  // overlay, notch) chegam nas tasks da Fase 4 — ver apps/ui/src/surfaces/.
+  // Exemplo de consumo do design system Liquid Glass (T-400). As superfícies
+  // reais (app bar, home, overlay, notch) chegam nas tasks seguintes da
+  // Fase 4 — ver apps/ui/src/surfaces/.
+  import GlassPanel from './lib/glass/GlassPanel.svelte'
+
   let ready: boolean = $state(true)
 </script>
 
 <main>
-  <h1>Ray</h1>
-  <p class="status">{ready ? 'core conectado' : 'aguardando core'}</p>
+  <GlassPanel surface="home">
+    <h1>Ray</h1>
+    <p class="status">{ready ? 'core conectado' : 'aguardando core'}</p>
+  </GlassPanel>
 </main>
 
 <style>
   main {
     display: flex;
-    flex-direction: column;
     align-items: center;
     justify-content: center;
     min-height: 100vh;
-    gap: 0.5rem;
-    font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
-    color: #08060d;
-    background: #fff;
+    padding: 2.4rem;
   }
 
   h1 {
-    font-size: 2rem;
+    font-size: 2.4rem;
     margin: 0;
   }
 
   .status {
-    margin: 0;
-    color: #6b6375;
+    margin: 0.4rem 0 0;
+    opacity: 0.72;
   }
 </style>
