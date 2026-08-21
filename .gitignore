@@ -5,6 +5,11 @@
 node_modules/
 dist/
 build/
+# excecao: produtos empacotados do Ray Audio Driver sao commiteis
+# (driver/scripts/verify-driver.sh resolve os produtos antes do build, T-500)
+!driver/ray-audio-driver/build/
+# diretorio de build do SwiftPM do driver (regerado pelo gate, nunca commitado)
+driver/ray-audio-driver/.build/
 
 # Rust / Tauri
 /core/target/
