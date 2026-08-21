@@ -7,15 +7,15 @@ set -euo pipefail
 # (never empty — safe to expand under set -u even on bash 3.2, which chokes on
 # expanding a genuinely EMPTY array, not a populated one).
 SPEC_PATHS=("/Users/lucasmansoldo/Projects/ray/docs/TASKS.md" "/Users/lucasmansoldo/Projects/ray/docs/docs/SRS-Ray.md" "/Users/lucasmansoldo/Projects/ray/docs/docs/ADR-Ray.md" "/Users/lucasmansoldo/Projects/ray/docs/README.md")
-BRANCH_NAME="ralph/fase-4-ui"
+BRANCH_NAME="ralph/fase-5-ship"
 MAX_ATTEMPTS_PER_ITEM="5"
 PER_CALL_BUDGET_USD="50"
 TOTAL_BUDGET_USD="150"
-SETUP_CMD="cd apps/ui && npm install"
+SETUP_CMD=""
 MODEL_LIGHT="deepseek-v4-flash"
 MODEL_MEDIUM="deepseek-v4-pro[1m]"
 MODEL_STRONG="deepseek-v4-pro[1m]"
-FULL_SUITE_CMD="cd apps/ui && npm run check"
+FULL_SUITE_CMD="cd core && cargo check && cd ../sidecar && npm run typecheck && npm test && cd ../apps/ui && npm run check"
 CLAUDE_BIN="$HOME/claude-deepseek.sh"
 
 RALPH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,7 +38,7 @@ fail() { echo "ABORT: $1" >&2; exit 1; }
 # Failures are silenced so a broken emit never aborts the run.
 emit_event() {
   local type="$1"
-  local extra='{}'
+  local extra='{}';
   [ -n "${2-}" ] && extra="$2"
   jq -cn \
     --arg e "$type" \

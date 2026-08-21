@@ -1,49 +1,45 @@
 # Scope for this ralph-loop run
 
-This run covers **only FASE 4 — UI (apps/ui)** from `docs/TASKS.md`:
-T-400, T-401, T-402, T-403, T-404, T-405, T-406, T-407, T-408.
+This run covers **only FASE 5 — Ship** from `docs/TASKS.md`:
+T-500, T-501, T-502, T-503.
 
-- **FASE 0 (T-000..T-003) is already implemented and merged into `dev`.** Tauri scaffold,
-  `core/src/lib.rs` commands, `contracts/ipc.ts`, `contracts/settings.ts` are all available.
-- **FASE 1 (T-100..T-103) is already implemented and merged into `dev`.** LangGraph.js agent
-  graph, session/assistant handlers, and streaming are available.
-- **FASE 2 (T-200..T-207) is already implemented and merged into `dev`.** All provider adapters
-  and credential validation handlers are available.
-- **FASE 3 (T-300..T-307) is already implemented and merged into `dev`.** Sidecar supervision,
-  vault, credential injection, SSE→Tauri streaming bridge, window controls/stealth, global
-  shortcuts, audio capture, and STT are all available as Tauri commands.
-- **FASE 5 onward (T-5xx) is out of scope for this run.**
+- **FASES 0–4 (T-000..T-408) are already implemented and merged into `dev`.** All Rust core
+  commands, sidecar, UI surfaces, provider adapters, audio capture, STT, and streaming are
+  available as a working foundation.
+- There is no Fase 6 — this is the final phase.
 
 ## Item guidance
 
-All items in this run are in `apps/ui/` (Svelte 5 + Vite, NOT SvelteKit).
-Read `.claude/rules/frontend.md` and `.claude/rules/general.md` before generating any item's contract.
+Fase 5 is a mixed-stack phase. Items span:
+- **T-500**: macOS Audio Server Plugin (Swift/C, privileged installer) — lives outside the
+  main Tauri build, versionned separately per ADR-009.
+- **T-501**: Cross-platform packaging (Tauri bundler, AppImage/.deb/dmg/msi), embedded
+  Whisper model for Win/Linux per ADR-009/RID-3/6.
+- **T-502**: Signed auto-update (Tauri updater plugin) per RID-4.
+- **T-503**: Local error-only logging and log export (RF-1004) — never log meeting content.
+
+Read `.claude/rules/core.md`, `.claude/rules/general.md`, and `.claude/rules/infra.md`
+before generating any item's contract.
 
 **Dependency graph within this run:**
-- T-400 (design system tokens + base glass components) has no intra-run dependencies — it is the foundation.
-- T-401 (app bar), T-402 (home), T-403 (overlay), T-404 (notch), T-405 (onboarding),
-  T-406 (settings), T-407 (assistants), T-408 (markdown/editor) all depend on T-400.
-- T-408 (markdown renderer + Milkdown editor) is consumed by T-403, T-404, T-407 — sequence T-408 before those three.
-- T-404 (Notch) and T-403 (overlay) depend on T-303's streaming bridge — treat it as available.
+- T-500 depends on T-306 (already done — treat as available).
+- T-501 depends on T-307 (already done — treat as available).
+- T-502 depends on T-501.
+- T-503 depends on T-001 (already done — treat as available).
+- T-500 and T-503 are independent of each other.
 
 **Critical rules for all items:**
-- **Svelte 5 runes only** — `$props()`, `$state()`, `$derived()`, `$effect()`, `$bindable()`, `Snippet`.
-  Never `export let`; never SvelteKit conventions (`+page.svelte`, `+layout`, routing).
-- **Plain Vite, not SvelteKit** — there is no file-based router.
-- **No `any`** in TypeScript — use `unknown` + type guards / Zod.
-- **Tauri `invoke()` only** for IPC — never call the sidecar directly.
-- **No emojis** in UI or code/comments.
-- **`rem` over `px`** for new styles (10px = 1rem).
-- **Liquid Glass design system** lives in `apps/ui/src/lib/glass/` — reuse before creating new primitives.
-- **i18n**: RNF-502 is deferred. All Fase 4 user-facing strings are hardcoded in PT-BR. No translation library, no key convention, no en.json. The contract phase must NOT surface this as an uncovered requirement — it is intentionally out of scope for this run.
-- **No icon library chosen yet** — check existing imports before adding one.
+- No `.unwrap()`/`.expect()` on any I/O path — propagate with `?` into `Result<T, E>`.
+- Secrets never logged, never persisted outside `vault.rs` (ADR-003).
+- T-503: meeting content (transcripts, suggestions) must NEVER appear in logs — only
+  errors and diagnostics.
+- T-500: the audio driver runs as a privileged process; minimize its attack surface.
+- i18n: all user-facing strings hardcoded in PT-BR (deferred, same decision as Fase 4).
 
 **Test strategy:**
-- `npm run check` (svelte-check + tsc) gates every item — must pass clean.
-- Vitest + @testing-library/svelte is not yet scaffolded in apps/ui; items that add test infrastructure should do so as part of T-400 or the first item that needs it.
-- Glass components: test token application and slot rendering.
-- Streaming surfaces (T-403, T-404): test event consumption order (start → token* → done/error).
-- Markdown renderer (T-408): test that a code block survives a render cycle unchanged.
+- `cargo check` gates all Rust items.
+- T-501/T-502: build scripts and manifest validation are testable; actual installer
+  signing requires platform CI — mock the signing step in unit tests.
+- T-503: test that log output never contains transcript content.
 
-Produce exactly 9 items (one per T-400..T-408), or a justified split per the sizing
-rule in the Contract-phase instructions.
+Produce exactly 4 items (one per T-500..T-503).
