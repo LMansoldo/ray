@@ -1,14 +1,8 @@
 <script lang="ts">
-  // Superfície AppBar (T-401 / RF-010): barra flutuante compacta com grip de
-  // arrastar nativo, botão Home (abre a superfície Home via canal local),
-  // indicador de status, botão stealth (bola laranja — RF-502: alterna o
-  // estado visivelmente via set_stealth) e "Iniciar Configuração" (abre o
-  // onboarding via canal local). Ocultar é o panic hide (RF-504) — o mesmo
-  // comando toggle_window do menu da bandeja (RF-010). Ativar o stealth
-  // exibe o aviso de uso responsável e conformidade legal (RF-508, SRS §7).
   import { invoke } from '@tauri-apps/api/core'
+  import { emit } from '@tauri-apps/api/event'
   import { glassTokens } from '../../lib/glass/tokens'
-  import { dispatchAppBarNavigation } from './navigation'
+  import type { AppBarDestination } from './navigation'
   import type { AppBarProps } from './types'
 
   let {
@@ -16,14 +10,9 @@
     stealthExcluded = false,
   }: AppBarProps = $props()
 
-  // Alternância otimista (o comando core retorna void): o override local
-  // parte de null — sem desvio do prop — e só muda no clique, então montar
-  // com stealthExcluded=true nunca re-dispara set_stealth sozinho.
   let stealthOverride = $state<boolean | null>(null)
   const stealthActive = $derived(stealthOverride ?? stealthExcluded)
 
-  // Aviso RF-508 (SRS 7.1-7.3): consentimento, uso responsável e
-  // conformidade legal — responsabilidade do usuário.
   const STEALTH_NOTICE =
     'Stealth ativo: garanta o consentimento das pessoas capturadas. ' +
     'O uso é de inteira responsabilidade do usuário, inclusive a ' +
@@ -35,8 +24,13 @@
     void invoke('set_stealth', { windowLabel, excluded: nextExcluded })
   }
 
-  function hideWindow(): void {
-    void invoke('toggle_window', { windowLabel })
+  async function navigateTo(dest: AppBarDestination): Promise<void> {
+    await invoke('show_window', { windowLabel: 'main' })
+    await emit('ray:navigate', { surface: dest })
+  }
+
+  async function hideMainWindow(): Promise<void> {
+    await invoke('hide_window', { windowLabel: 'main' })
   }
 </script>
 
@@ -66,7 +60,7 @@
     <button
       type="button"
       class="appbar__home"
-      onclick={() => dispatchAppBarNavigation('home')}
+      onclick={() => void navigateTo('home')}
     >
       Home
     </button>
@@ -87,7 +81,7 @@
     <button
       type="button"
       class="appbar__nav"
-      onclick={() => dispatchAppBarNavigation('assistants')}
+      onclick={() => void navigateTo('assistants')}
     >
       Assistentes
     </button>
@@ -95,7 +89,7 @@
     <button
       type="button"
       class="appbar__nav"
-      onclick={() => dispatchAppBarNavigation('settings')}
+      onclick={() => void navigateTo('settings')}
     >
       Configuracoes
     </button>
@@ -103,12 +97,12 @@
     <button
       type="button"
       class="appbar__setup"
-      onclick={() => dispatchAppBarNavigation('onboarding')}
+      onclick={() => void navigateTo('onboarding')}
     >
-      Onboarding
+      Iniciar Configuracao
     </button>
 
-    <button type="button" class="appbar__hide" onclick={hideWindow}>
+    <button type="button" class="appbar__hide" onclick={() => void hideMainWindow()}>
       Ocultar
     </button>
   </div>
