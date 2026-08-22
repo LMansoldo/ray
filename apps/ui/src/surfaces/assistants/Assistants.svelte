@@ -11,6 +11,7 @@
   // no editor via handle.setMarkdown. A UI NUNCA inventa um comando invoke()
   // (frontend.md).
   import { onMount } from 'svelte'
+  import { glassTokens } from '../../lib/glass/tokens'
   import MarkdownEditor from '../../lib/editor/MarkdownEditor.svelte'
   import type { MarkdownEditorHandle } from '../../lib/editor/editor'
   import GlassPanel from '../../lib/glass/GlassPanel.svelte'
@@ -133,17 +134,35 @@
   function createAssistant(): void {
     if (creatorName === '') return
     const prompt = editorHandle?.getMarkdown() ?? ''
-    if (prompt.trim() === '') return
-    dispatchAssistantAction({
-      type: 'assistantCreate',
+    const category = narrowCreatorCategory(creatorCategory)
+    dispatchAssistantAction({ type: 'assistantCreate', name: creatorName, category, prompt })
+
+    // Adiciona localmente sem esperar o core (não há comando ainda).
+    const newAssistant: AssistantView = {
+      id: `local-${Date.now()}`,
       name: creatorName,
-      category: narrowCreatorCategory(creatorCategory),
+      category,
       prompt,
-    })
+    }
+    assistants = [newAssistant, ...assistants]
+    activeOverride = newAssistant.id
+
+    // Volta para a biblioteca e limpa o formulário.
+    view = 'library'
+    creatorName = ''
+    creatorCategory = 'GENERAL'
+    editorHandle?.setMarkdown('')
   }
 </script>
 
-<div class="assistants" data-assistants>
+<div
+  class="assistants"
+  data-assistants
+  style:--surface-fill={glassTokens.color.surface}
+  style:--surface-border={glassTokens.color.border}
+  style:--surface-content={glassTokens.color.content}
+  style:--surface-solid={glassTokens.color.surfaceSolid}
+>
   {#if view === 'library'}
     <GlassPanel surface="home">
       <section class="assistants__library" data-assistant-library>
@@ -291,18 +310,18 @@
     min-width: 16rem;
     padding: 0.6rem 1rem;
     font: inherit;
-    color: rgb(24, 22, 31);
-    background: rgba(255, 255, 255, 0.4);
-    border: 1px solid rgba(255, 255, 255, 0.64);
+    color: var(--surface-content);
+    background: var(--surface-fill);
+    border: 0.1rem solid var(--surface-border);
     border-radius: 0.8rem;
   }
 
   .assistants__category-filter {
     padding: 0.6rem 0.8rem;
     font: inherit;
-    color: rgb(24, 22, 31);
-    background: rgba(255, 255, 255, 0.4);
-    border: 1px solid rgba(255, 255, 255, 0.64);
+    color: var(--surface-content);
+    background: var(--surface-fill);
+    border: 0.1rem solid var(--surface-border);
     border-radius: 0.8rem;
   }
 
@@ -312,18 +331,18 @@
   .assistants__create {
     padding: 0.6rem 1.2rem;
     font: inherit;
-    color: rgb(24, 22, 31);
-    background: rgba(255, 255, 255, 0.4);
-    border: 1px solid rgba(255, 255, 255, 0.64);
+    color: var(--surface-content);
+    background: var(--surface-fill);
+    border: 0.1rem solid var(--surface-border);
     border-radius: 0.8rem;
     cursor: pointer;
   }
 
   .assistants__tool--primary,
   .assistants__create {
-    color: rgb(248, 246, 250);
-    background: rgb(24, 22, 31);
-    border-color: rgb(24, 22, 31);
+    color: var(--surface-solid);
+    background: var(--surface-content);
+    border-color: var(--surface-content);
   }
 
   .assistants__tool:disabled,
@@ -347,16 +366,16 @@
     padding: 1rem 1.2rem;
     font: inherit;
     text-align: left;
-    color: rgb(24, 22, 31);
-    background: rgba(255, 255, 255, 0.4);
-    border: 1px solid rgba(255, 255, 255, 0.64);
+    color: var(--surface-content);
+    background: var(--surface-fill);
+    border: 0.1rem solid var(--surface-border);
     border-radius: 0.8rem;
     cursor: pointer;
   }
 
   .assistants__row[data-assistant-active='true'] {
-    outline: 2px solid rgb(24, 22, 31);
-    outline-offset: -2px;
+    outline: 0.2rem solid var(--surface-content);
+    outline-offset: -0.2rem;
   }
 
   .assistants__row-name {
@@ -421,9 +440,9 @@
   .assistants__category-select {
     padding: 0.6rem 1rem;
     font: inherit;
-    color: rgb(24, 22, 31);
-    background: rgba(255, 255, 255, 0.4);
-    border: 1px solid rgba(255, 255, 255, 0.64);
+    color: var(--surface-content);
+    background: var(--surface-fill);
+    border: 0.1rem solid var(--surface-border);
     border-radius: 0.8rem;
   }
 

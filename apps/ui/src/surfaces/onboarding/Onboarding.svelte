@@ -15,6 +15,8 @@
     OnboardingState,
   } from './types'
 
+  let { oncomplete }: { oncomplete?: () => void } = $props()
+
   /** Títulos dos 6 passos, na ordem exata do RF-101. */
   const STEP_TITLES = [
     'Verificação de permissões',
@@ -128,6 +130,7 @@
   style:--surface-border={glassTokens.color.border}
   style:--surface-content={glassTokens.color.content}
   style:--surface-shadow={glassTokens.shadow.background}
+  style:--surface-blur={glassTokens.blur.surface}
 >
   <ol class="onboarding__steps">
     {#each STEP_TITLES as title (title)}
@@ -180,7 +183,7 @@
       </button>
     {:else if currentStep === 6}
       <div class="onboarding__trial" data-trial-card>
-        <button type="button" class="onboarding__trial-start">
+        <button type="button" class="onboarding__trial-start" onclick={() => oncomplete?.()}>
           Iniciar teste de 7 dias
         </button>
       </div>
@@ -232,6 +235,8 @@
     border: 0.1rem solid var(--surface-border);
     border-radius: 1.2rem;
     box-shadow: var(--surface-shadow);
+    backdrop-filter: blur(var(--surface-blur));
+    -webkit-backdrop-filter: blur(var(--surface-blur));
   }
 
   .onboarding__title {
@@ -250,8 +255,11 @@
     justify-content: space-between;
     gap: 1.6rem;
     padding: 0.8rem 1.2rem;
+    background: var(--surface-fill);
     border: 0.1rem solid var(--surface-border);
     border-radius: 1.2rem;
+    backdrop-filter: blur(var(--surface-blur));
+    -webkit-backdrop-filter: blur(var(--surface-blur));
   }
 
   .onboarding__permission-name {

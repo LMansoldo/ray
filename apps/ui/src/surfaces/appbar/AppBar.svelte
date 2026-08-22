@@ -49,6 +49,11 @@
   style:--surface-shadow={glassTokens.shadow.background}
   style:--surface-blur={glassTokens.blur.surface}
 >
+  <span
+    class="appbar__refraction"
+    aria-hidden="true"
+    style="background-image: {glassTokens.refraction.sheen};"
+  ></span>
   <div class="appbar__bar">
     <!-- Alça de arraste declarativa (Tauri 2): o core não registra comando de
          drag e frontend.md proíbe a UI de inventar um. -->
@@ -81,10 +86,26 @@
 
     <button
       type="button"
+      class="appbar__nav"
+      onclick={() => dispatchAppBarNavigation('assistants')}
+    >
+      Assistentes
+    </button>
+
+    <button
+      type="button"
+      class="appbar__nav"
+      onclick={() => dispatchAppBarNavigation('settings')}
+    >
+      Configuracoes
+    </button>
+
+    <button
+      type="button"
       class="appbar__setup"
       onclick={() => dispatchAppBarNavigation('onboarding')}
     >
-      Iniciar Configuração
+      Onboarding
     </button>
 
     <button type="button" class="appbar__hide" onclick={hideWindow}>
@@ -99,6 +120,8 @@
 
 <style>
   .appbar {
+    position: relative;
+    isolation: isolate;
     display: flex;
     flex-direction: column;
     gap: 0.8rem;
@@ -110,6 +133,14 @@
     border-radius: 1.2rem;
     box-shadow: var(--surface-shadow);
     backdrop-filter: blur(var(--surface-blur));
+    -webkit-backdrop-filter: blur(var(--surface-blur));
+  }
+
+  .appbar__refraction {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
   }
 
   .appbar__bar {
@@ -136,6 +167,7 @@
   }
 
   .appbar__home,
+  .appbar__nav,
   .appbar__setup,
   .appbar__hide {
     font: inherit;

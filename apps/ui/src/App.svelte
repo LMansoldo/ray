@@ -1,35 +1,98 @@
 <script lang="ts">
-  // Exemplo de consumo do design system Liquid Glass (T-400). As superfícies
-  // reais (app bar, home, overlay, notch) chegam nas tasks seguintes da
-  // Fase 4 — ver apps/ui/src/surfaces/.
-  import GlassPanel from './lib/glass/GlassPanel.svelte'
+  import { onMount } from 'svelte'
+  import AppBar from './surfaces/appbar/AppBar.svelte'
+  import Home from './surfaces/home/Home.svelte'
+  import Onboarding from './surfaces/onboarding/Onboarding.svelte'
+  import Settings from './surfaces/settings/Settings.svelte'
+  import Assistants from './surfaces/assistants/Assistants.svelte'
+  import Overlay from './surfaces/overlay/Overlay.svelte'
+  import { onAppBarNavigate } from './surfaces/appbar/navigation'
+  import { onHomeNavigate } from './surfaces/home/navigation'
+  import { onOnboardingRestart } from './surfaces/onboarding/restart'
+  import type { HomeProps } from './surfaces/home/types'
 
-  let ready: boolean = $state(true)
+  type Surface = 'onboarding' | 'home' | 'settings' | 'assistants'
+
+  const ONBOARDING_DONE_KEY = 'ray_onboarding_done'
+  const initialSurface: Surface = localStorage.getItem(ONBOARDING_DONE_KEY)
+    ? 'home'
+    : 'onboarding'
+
+  let surface = $state<Surface>(initialSurface)
+  let overlayVisible = $state(false)
+
+  // Props placeholder para a Home — sem dados reais do core ainda.
+  const homeProps: HomeProps = {
+    sessions: [],
+    planName: 'Free',
+    freeSessionsUsed: 0,
+    freeSessionsTotal: 7,
+    assistant: { name: 'Assistente Padrão', category: 'GENERAL' },
+    memoryItems: [],
+    sessionId: '',
+    assistantId: '',
+    context: [],
+    credential: { kind: 'OPENAI', connectionMode: 'API_KEY', secret: '' },
+  }
+
+  function goTo(next: Surface): void {
+    surface = next
+  }
+
+  onMount(() => {
+    const unsubAppBar = onAppBarNavigate((dest) => {
+      if (dest === 'onboarding') {
+        localStorage.removeItem(ONBOARDING_DONE_KEY)
+        goTo('onboarding')
+      } else {
+        goTo(dest)
+      }
+    })
+
+    const unsubHome = onHomeNavigate((dest) => goTo(dest))
+
+    const unsubRestart = onOnboardingRestart(() => {
+      localStorage.removeItem(ONBOARDING_DONE_KEY)
+      goTo('onboarding')
+    })
+
+    return () => {
+      unsubAppBar()
+      unsubHome()
+      unsubRestart()
+    }
+  })
+
+  function handleOnboardingComplete(): void {
+    localStorage.setItem(ONBOARDING_DONE_KEY, '1')
+    goTo('home')
+  }
 </script>
 
-<main>
-  <GlassPanel surface="home">
-    <h1>Ray</h1>
-    <p class="status">{ready ? 'core conectado' : 'aguardando core'}</p>
-  </GlassPanel>
-</main>
+<div class="app">
+  {#if surface === 'onboarding'}
+    <Onboarding oncomplete={handleOnboardingComplete} />
+  {:else}
+    <AppBar />
+
+    {#if surface === 'home'}
+      <Home {...homeProps} />
+    {:else if surface === 'settings'}
+      <Settings />
+    {:else if surface === 'assistants'}
+      <Assistants />
+    {/if}
+
+    {#if overlayVisible}
+      <Overlay />
+    {/if}
+  {/if}
+</div>
 
 <style>
-  main {
-    display: flex;
-    align-items: center;
-    justify-content: center;
+  .app {
     min-height: 100vh;
-    padding: 2.4rem;
-  }
-
-  h1 {
-    font-size: 2.4rem;
-    margin: 0;
-  }
-
-  .status {
-    margin: 0.4rem 0 0;
-    opacity: 0.72;
+    display: flex;
+    flex-direction: column;
   }
 </style>

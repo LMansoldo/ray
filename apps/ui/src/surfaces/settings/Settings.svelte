@@ -397,6 +397,7 @@
   style:--surface-border={glassTokens.color.border}
   style:--surface-content={glassTokens.color.content}
   style:--surface-shadow={glassTokens.shadow.background}
+  style:--surface-blur={glassTokens.blur.surface}
 >
   <nav class="settings__tabs">
     {#each TABS as tab (tab.id)}
@@ -695,6 +696,8 @@
     border: 0.1rem solid var(--surface-border);
     border-radius: 1.2rem;
     box-shadow: var(--surface-shadow);
+    backdrop-filter: blur(var(--surface-blur));
+    -webkit-backdrop-filter: blur(var(--surface-blur));
   }
 
   .settings__filter {
@@ -727,8 +730,11 @@
     flex-direction: column;
     gap: 0.8rem;
     padding: 1.2rem;
+    background: var(--surface-fill);
     border: 0.1rem solid var(--surface-border);
     border-radius: 1.2rem;
+    backdrop-filter: blur(var(--surface-blur));
+    -webkit-backdrop-filter: blur(var(--surface-blur));
   }
 
   .settings__provider-title,

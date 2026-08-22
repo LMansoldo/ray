@@ -7,7 +7,7 @@
 // quando a camada App existir.
 
 /** Superfícies que a app bar pode abrir. */
-export type AppBarDestination = 'home' | 'onboarding'
+export type AppBarDestination = 'home' | 'settings' | 'assistants' | 'onboarding'
 
 type AppBarNavigationListener = (destination: AppBarDestination) => void
 
