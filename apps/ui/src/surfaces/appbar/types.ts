@@ -4,8 +4,9 @@
 
 export type AppBarProps = {
   /**
-   * Label da janela Tauri alvo dos comandos set_stealth e toggle_window.
-   * Padrão 'main' — label da única janela declarada em core/tauri.conf.json.
+   * Label da janela Tauri alvo do comando set_stealth.
+   * Navegacao sempre aponta para 'main'; esta prop nao controla o destino.
+   * Padrao 'main' — label da unica janela declarada em core/tauri.conf.json.
    */
   windowLabel?: string
   /**
