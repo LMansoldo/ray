@@ -12,13 +12,29 @@
   "app": {
     "windows": [
       {
+        "label": "appbar",
+        "title": "Ray",
+        "url": "/",
+        "width": 700,
+        "height": 72,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "resizable": false,
+        "visible": true,
+        "center": true
+      },
+      {
         "label": "main",
         "title": "Ray",
         "url": "/",
-        "width": 1024,
-        "height": 768,
+        "width": 900,
+        "height": 640,
+        "decorations": true,
+        "transparent": false,
+        "visible": false,
         "resizable": true,
-        "visible": true
+        "center": true
       }
     ]
   },
