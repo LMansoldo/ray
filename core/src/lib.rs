@@ -13,6 +13,7 @@ pub mod windows;
 
 use ipc::SuggestRequest;
 use std::sync::atomic::{AtomicU16, Ordering};
+use tauri::Manager;
 
 // --- Estado do sidecar ---------------------------------------------------
 // Porta loopback do sidecar, registrada pelo supervisor (sidecar.rs) após
@@ -44,6 +45,27 @@ fn set_stealth(window_label: String, excluded: bool) {
 #[tauri::command]
 fn toggle_window(window_label: String) {
     windows::toggle_visibility(&window_label);
+}
+
+/// Mostra uma janela pelo label (multi-janela: AppBar abre a janela main).
+/// Usa o AppHandle diretamente — sem passar pelo registry de toggle — para
+/// evitar dessincronização com o estado inicial `visible: false` do tauri.conf.json.
+#[tauri::command]
+fn show_window(app: tauri::AppHandle, window_label: String) -> Result<(), String> {
+    app.get_webview_window(&window_label)
+        .ok_or_else(|| format!("janela '{}' nao encontrada", window_label))?
+        .show()
+        .map_err(|e| e.to_string())
+}
+
+/// Oculta uma janela pelo label (multi-janela: botao Ocultar do AppBar).
+/// Usa o AppHandle diretamente pelo mesmo motivo que show_window.
+#[tauri::command]
+fn hide_window(app: tauri::AppHandle, window_label: String) -> Result<(), String> {
+    app.get_webview_window(&window_label)
+        .ok_or_else(|| format!("janela '{}' nao encontrada", window_label))?
+        .hide()
+        .map_err(|e| e.to_string())
 }
 
 /// Resolver de credencial que consulta o cofre nativo (vault).
@@ -375,6 +397,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             set_stealth,
             toggle_window,
+            show_window,
+            hide_window,
             suggest,
             transcribe_pending_pcm,
             open_logs_folder,
