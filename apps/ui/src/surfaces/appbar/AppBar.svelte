@@ -119,9 +119,9 @@
     flex-direction: column;
     gap: 0.8rem;
     /* Margem dá espaço para a sombra não ser cortada pela janela Tauri. */
-    margin: 2rem auto;
-    max-width: 64rem;
-    padding: 0.8rem;
+    margin: 2.4rem auto;
+    max-width: 90rem;
+    padding: 0.8rem 1.2rem;
     color: var(--surface-content);
     background: var(--surface-fill);
     border: 0.1rem solid var(--surface-border);
@@ -142,7 +142,7 @@
     display: flex;
     align-items: center;
     gap: 0.8rem;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
   }
 
   .appbar__grip {
@@ -151,6 +151,7 @@
     gap: 0.3rem;
     padding: 0.4rem 0.6rem;
     cursor: grab;
+    flex-shrink: 0;
   }
 
   .appbar__grip-dot {
@@ -167,18 +168,22 @@
   .appbar__hide {
     font: inherit;
     font-size: 1.2rem;
-    padding: 0.5rem 1rem;
+    padding: 0.4rem 0.9rem;
     color: var(--surface-content);
     background: transparent;
     border: 0.1rem solid var(--surface-border);
     border-radius: 1.2rem;
     cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
   }
 
   .appbar__status {
     flex: 1;
-    min-width: 12rem;
     font-size: 1.2rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .appbar__stealth {
