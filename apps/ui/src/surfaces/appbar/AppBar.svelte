@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core'
   import { emit } from '@tauri-apps/api/event'
+  import { getCurrentWindow } from '@tauri-apps/api/window'
   import { glassTokens } from '../../lib/glass/tokens'
   import type { AppBarDestination } from './navigation'
   import type { AppBarProps } from './types'
@@ -17,6 +18,14 @@
     'Stealth ativo: garanta o consentimento das pessoas capturadas. ' +
     'O uso é de inteira responsabilidade do usuário, inclusive a ' +
     'conformidade legal da gravação. Use de forma responsável.'
+
+  // data-tauri-drag-region nao funciona com position:fixed no WKWebView.
+  // startDragging() no mousedown em areas nao-interativas e a alternativa confiavel.
+  function handleDragStart(event: MouseEvent): void {
+    const target = event.target as Element
+    if (target.closest('button, input, a, select, textarea')) return
+    void getCurrentWindow().startDragging()
+  }
 
   function toggleStealth(): void {
     const nextExcluded = !stealthActive
@@ -37,7 +46,7 @@
 <nav
   class="appbar"
   data-appbar
-  data-tauri-drag-region
+  onmousedown={handleDragStart}
   style:--surface-fill={glassTokens.color.surface}
   style:--surface-border={glassTokens.color.border}
   style:--surface-content={glassTokens.color.content}
