@@ -113,11 +113,13 @@
 
 <style>
   .appbar {
-    /* Preenche a janela Tauri inteira: o border-radius cria o efeito de pílula
-       recortando os cantos transparentes. A janela deve ter exatamente a altura
-       da barra (ver tauri.conf.json) para não sobrar area branca. */
-    position: fixed;
-    inset: 0;
+    /* Ocupa toda a janela Tauri (height=52px no tauri.conf.json).
+       Evitamos position:fixed porque no WKWebView do macOS elementos fixed
+       sao compostos em layer separada que nao entrega mousedown ao listener
+       do documento — quebrando data-tauri-drag-region. */
+    position: relative;
+    width: 100%;
+    height: 100dvh;
     isolation: isolate;
     display: flex;
     flex-direction: column;
