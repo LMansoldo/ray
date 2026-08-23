@@ -13,10 +13,14 @@
   box-sizing: border-box;
 }
 
+html {
+  /* Sem isso, o html canvas fica branco no WKWebView mesmo com body transparente. */
+  background: transparent;
+}
+
 body {
   margin: 0;
   font-size: 1.4rem;
   line-height: 1.5;
-  /* A janela do Tauri é translúcida; o fundo real é a tela atrás dela. */
   background: transparent;
 }

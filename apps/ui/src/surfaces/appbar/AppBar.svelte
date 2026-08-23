@@ -37,6 +37,7 @@
 <nav
   class="appbar"
   data-appbar
+  data-tauri-drag-region
   style:--surface-fill={glassTokens.color.surface}
   style:--surface-border={glassTokens.color.border}
   style:--surface-content={glassTokens.color.content}
@@ -49,9 +50,7 @@
     style="background-image: {glassTokens.refraction.sheen};"
   ></span>
   <div class="appbar__bar">
-    <!-- Alça de arraste declarativa (Tauri 2): o core não registra comando de
-         drag e frontend.md proíbe a UI de inventar um. -->
-    <div class="appbar__grip" data-appbar-grip data-tauri-drag-region>
+    <div class="appbar__grip" data-appbar-grip>
       <span class="appbar__grip-dot"></span>
       <span class="appbar__grip-dot"></span>
       <span class="appbar__grip-dot"></span>
@@ -119,7 +118,9 @@
     display: flex;
     flex-direction: column;
     gap: 0.8rem;
-    max-width: 44rem;
+    /* Margem dá espaço para a sombra não ser cortada pela janela Tauri. */
+    margin: 2rem auto;
+    max-width: 64rem;
     padding: 0.8rem;
     color: var(--surface-content);
     background: var(--surface-fill);
