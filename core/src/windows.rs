@@ -641,6 +641,34 @@ pub fn apply_opacity(window: &tauri::WebviewWindow, opacity: f64) -> Result<(), 
     apply_opacity_platform(window, opacity)
 }
 
+/// Habilita arrastar a janela clicando em qualquer area nao-interativa (macOS only).
+///
+/// Janelas sem decoracoes (decorations:false) nao sao moviveis por padrao no macOS
+/// porque nao possuem barra de titulo. Definir isMovableByWindowBackground=true
+/// delega o drag ao macOS de forma sincrona (sem IPC JS→Rust), tornando-o confiavel.
+///
+/// No-op em outras plataformas (nao compilado).
+pub fn enable_movable_by_background(window: &tauri::WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::NSView;
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        let Ok(handle) = window.window_handle() else { return };
+        let RawWindowHandle::AppKit(appkit) = handle.as_raw() else { return };
+        let ns_view_ptr = appkit.ns_view.as_ptr() as *const NSView;
+        // SAFETY: Tauri garante que ns_view aponta para um NSView valido instalado
+        // em uma janela. A referencia dura apenas o escopo desta chamada.
+        let ns_view = unsafe { &*ns_view_ptr };
+        let Some(ns_window) = ns_view.window() else { return };
+        ns_window.setMovableByWindowBackground(true);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

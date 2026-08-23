@@ -394,6 +394,16 @@ pub fn run() {
     tauri::Builder::default()
         // T-502: plugin de auto-update assinado (RID-4 / ADR-009).
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .setup(|app| {
+            windows::init_registry();
+            windows::init_app_handle(app.handle().clone());
+            // macOS: janela sem decoracoes nao e movivel por padrao.
+            // isMovableByWindowBackground=true delega o drag ao SO sem JS.
+            if let Some(appbar) = app.get_webview_window("appbar") {
+                windows::enable_movable_by_background(&appbar);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             set_stealth,
             toggle_window,
