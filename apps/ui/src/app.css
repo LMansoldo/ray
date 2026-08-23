@@ -5,7 +5,10 @@
 :root {
   /* 1rem = 10px: a convenção de unidades do repo (.claude/rules/general.md). */
   font-size: 62.5%;
-  color-scheme: light;
+  /* color-scheme removido: declarar 'light' faz o WebKit pintar o canvas
+     com branco do sistema, que aparece por trás do html transparente no
+     WKWebView mesmo com transparent:true no Tauri. Os tokens de vidro usam
+     rgba() explícitos e não dependem de system colors. */
   font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
 }
 
@@ -13,8 +16,8 @@
   box-sizing: border-box;
 }
 
-html {
-  /* Sem isso, o html canvas fica branco no WKWebView mesmo com body transparente. */
+html,
+body {
   background: transparent;
 }
 
@@ -22,5 +25,4 @@ body {
   margin: 0;
   font-size: 1.4rem;
   line-height: 1.5;
-  background: transparent;
 }
