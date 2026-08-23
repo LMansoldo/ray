@@ -28,12 +28,6 @@ const { emitMock } = vi.hoisted(() => ({
 }))
 vi.mock('@tauri-apps/api/event', () => ({ emit: emitMock }))
 
-const { startDraggingMock } = vi.hoisted(() => ({
-  startDraggingMock: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
-}))
-vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow: vi.fn(() => ({ startDragging: startDraggingMock })),
-}))
 
 type Props = AppBarProps
 
@@ -51,7 +45,6 @@ const EMOJI_PATTERN = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/u
 afterEach(() => {
   invokeMock.mockClear()
   emitMock.mockClear()
-  startDraggingMock.mockClear()
   cleanup()
 })
 
@@ -83,17 +76,10 @@ describe('AppBar — elementos da barra flutuante (RF-010)', () => {
     expect(container.querySelector('[data-appbar-grip]')).not.toBeNull()
   })
 
-  it('mousedown na barra (fora de botao) chama startDragging()', async () => {
+  it('a barra inteira e regiao de arraste nativa (data-tauri-drag-region)', () => {
     const { container } = render(AppBar, { props: baseProps })
-    const nav = container.querySelector('[data-appbar]')!
-    await fireEvent.mouseDown(nav)
-    expect(startDraggingMock).toHaveBeenCalledTimes(1)
-  })
-
-  it('mousedown em um botao nao chama startDragging()', async () => {
-    const { getByRole } = render(AppBar, { props: baseProps })
-    await fireEvent.mouseDown(getByRole('button', { name: 'Home' }))
-    expect(startDraggingMock).not.toHaveBeenCalled()
+    const nav = container.querySelector('[data-appbar]')
+    expect(nav?.hasAttribute('data-tauri-drag-region')).toBe(true)
   })
 
   it('comeca com stealth inativo e sem aviso', () => {
