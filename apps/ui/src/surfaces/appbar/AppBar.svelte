@@ -113,14 +113,15 @@
 
 <style>
   .appbar {
-    position: relative;
+    /* Preenche a janela Tauri inteira: o border-radius cria o efeito de pílula
+       recortando os cantos transparentes. A janela deve ter exatamente a altura
+       da barra (ver tauri.conf.json) para não sobrar area branca. */
+    position: fixed;
+    inset: 0;
     isolation: isolate;
     display: flex;
     flex-direction: column;
     gap: 0.8rem;
-    /* Margem dá espaço para a sombra não ser cortada pela janela Tauri. */
-    margin: 2.4rem auto;
-    max-width: 90rem;
     padding: 0.8rem 1.2rem;
     color: var(--surface-content);
     background: var(--surface-fill);
