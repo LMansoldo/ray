@@ -2,21 +2,29 @@
   // Superfície Assistentes (T-407): biblioteca (RF-336/337) + criador de
   // novo assistente (RF-338). A lista e o ativo entram pelo feed local
   // (assistants-feed.ts), lido UMA vez na montagem — nenhum comando core de
-  // listagem existe. A seleção despacha assistantSelect e flippa o ativo
-  // otimisticamente (derived override, precedente AppBar T-401); a criação
+  // listagem existe. A seleção despacha assistantSelect, flippa o ativo
+  // otimisticamente (derived override, precedente AppBar T-401) e emite o
+  // evento Tauri ray:assistant-changed (barramento cross-surface, mesmo
+  // padrão do ray:navigate T-402) para o Home/copiloto escutar; a criação
   // despacha assistantCreate com o prompt lido do MODELO Milkdown
   // (handle.getMarkdown() — parse -> serialize, ADR-011: Markdown entra e
-  // Markdown sai, sem round-trip para HTML). O prompt importado chega pelo
-  // canal onPromptImport (o leitor de arquivo nativo é core-side) e aterra
-  // no editor via handle.setMarkdown. A UI NUNCA inventa um comando invoke()
-  // (frontend.md).
+  // Markdown sai, sem round-trip para HTML). O prompt importado é lido da
+  // UI (input de arquivo escondido, .md/.txt -> file.text()) e entregue
+  // pelo canal onPromptImport, aterrando no editor via handle.setMarkdown.
+  // A UI NUNCA inventa um comando invoke() (frontend.md).
   import { onMount } from 'svelte'
+  import { invoke } from '@tauri-apps/api/core'
+  import { emit } from '@tauri-apps/api/event'
   import { glassTokens } from '../../lib/glass/tokens'
   import MarkdownEditor from '../../lib/editor/MarkdownEditor.svelte'
   import type { MarkdownEditorHandle } from '../../lib/editor/editor'
   import GlassPanel from '../../lib/glass/GlassPanel.svelte'
   import type { AssistantCategory } from '../../../../../contracts/ipc'
-  import { dispatchAssistantAction, onPromptImport } from './assistant-actions'
+  import {
+    dispatchAssistantAction,
+    dispatchPromptImport,
+    onPromptImport,
+  } from './assistant-actions'
   import { readAssistantsState } from './assistants-feed'
   import {
     ASSISTANT_CATEGORIES,
@@ -31,6 +39,30 @@
   type AssistantViewKind = 'library' | 'creator'
 
   let view = $state<AssistantViewKind>('library')
+
+  /** Chave da seleção persistida de assistente ativo (RF-337). */
+  const ACTIVE_ASSISTANT_KEY = 'ray_active_assistant'
+  /** Evento Tauri que leva o assistente ativo às demais surfaces (App.svelte escuta). */
+  const ASSISTANT_CHANGED_EVENT = 'ray:assistant-changed'
+  let creatingAssistant = $state(false)
+
+  // localStorage pode não existir/funcionar em todo ambiente (testes jsdom,
+  // modo restrito) — a UI não pode falhar por causa da preferência de ativo.
+  function safeGet(key: string): string | null {
+    try {
+      return typeof localStorage?.getItem === 'function' ? localStorage.getItem(key) : null
+    } catch {
+      return null
+    }
+  }
+
+  function safeSet(key: string, value: string): void {
+    try {
+      localStorage?.setItem(key, value)
+    } catch {
+      // sem storage — segue sem persistir a preferência
+    }
+  }
 
   // ── Biblioteca (RF-336/337) ───────────────────────────────────────────
 
@@ -57,11 +89,31 @@
   let creatorCategory = $state('GENERAL')
   let editorHandle: MarkdownEditorHandle | null = null
   let pendingImportedPrompt: string | null = null
+  let importInput: HTMLInputElement | null = null
 
   onMount(() => {
     const state = readAssistantsState()
     assistants = state.assistants
     seededActiveId = state.activeAssistantId
+
+    // Biblioteca real: BUILTIN seeded + USER criados, via core (persistidos
+    // no banco do sidecar). O ativo volta do localStorage se existir.
+    void invoke<{ assistants: Array<{ id: string; name: string; category: string; source: string }> }>(
+      'list_assistants',
+    )
+      .then((res) => {
+        const active = safeGet(ACTIVE_ASSISTANT_KEY)
+        assistants = res.assistants.map((a) => ({
+          id: a.id,
+          name: a.name,
+          category: a.category as AssistantCategory,
+          prompt: '',
+        }))
+        if (active && res.assistants.some((a) => a.id === active)) {
+          seededActiveId = active
+        }
+      })
+      .catch((err) => console.error('[list_assistants]', err))
 
     return onPromptImport((prompt) => {
       if (editorHandle) {
@@ -105,11 +157,59 @@
 
   function selectAssistant(id: string): void {
     activeOverride = id
+    safeSet(ACTIVE_ASSISTANT_KEY, id)
     dispatchAssistantAction({ type: 'assistantSelect', assistantId: id })
+
+    // A seleção precisa ATRAVESSAR a fronteira da surface (o canal local de
+    // assistant-actions não sai daqui): o barramento Tauri entrega o ativo
+    // ao Home/copiloto (precedente ray:navigate T-402). Fire-and-forget —
+    // falha de IPC nunca derruba a UI.
+    const selected = assistants.find((assistant) => assistant.id === id)
+    if (selected) {
+      void emit(ASSISTANT_CHANGED_EVENT, {
+        id: selected.id,
+        name: selected.name,
+        category: selected.category,
+      }).catch(console.error)
+    }
   }
 
   function requestPromptImport(): void {
     dispatchAssistantAction({ type: 'promptImportRequest' })
+    // Leitor REAL: o input de arquivo escondido abre o seletor nativo —
+    // o conteúdo escolhido aterra no criador via onImportFileChange.
+    importInput?.click()
+  }
+
+  /** Remove a extensão final do nome do arquivo ("prompt.md" -> "prompt"). */
+  function stripFileExtension(fileName: string): string {
+    return fileName.replace(/\.[^./\\]*$/, '')
+  }
+
+  async function onImportFileChange(event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement
+    const file = input.files?.[0]
+    // Limpa a seleção para que reimportar o MESMO arquivo re-dispare change.
+    input.value = ''
+    if (!file) return
+
+    let prompt = ''
+    try {
+      prompt = await file.text()
+    } catch (err) {
+      console.error('[importar prompt]', err)
+      return
+    }
+
+    // A importação leva ao criador: abre se ainda estivermos na biblioteca
+    // (openCreator limpa o formulário antes do prefill abaixo).
+    if (view !== 'creator') openCreator()
+    if (creatorName === '') {
+      creatorName = stripFileExtension(file.name)
+    }
+    // Mesmo aterramento do leitor externo (canal onPromptImport): editor
+    // montado recebe direto; senão fica pendente até o onready do criador.
+    dispatchPromptImport(prompt)
   }
 
   function openCreator(): void {
@@ -131,21 +231,36 @@
     }
   }
 
-  function createAssistant(): void {
+  async function createAssistant(): Promise<void> {
     if (creatorName === '') return
     const prompt = editorHandle?.getMarkdown() ?? ''
+    // RF-338: sem prompt não há assistente para criar — nada é despachado.
+    if (prompt.trim() === '') return
     const category = narrowCreatorCategory(creatorCategory)
-    dispatchAssistantAction({ type: 'assistantCreate', name: creatorName, category, prompt })
+    const name = creatorName
+    dispatchAssistantAction({ type: 'assistantCreate', name, category, prompt })
 
-    // Adiciona localmente sem esperar o core (não há comando ainda).
-    const newAssistant: AssistantView = {
-      id: `local-${Date.now()}`,
-      name: creatorName,
-      category,
-      prompt,
+    // Persistência REAL: cria no banco via core e insere o registro com o
+    // id oficial (não mais `local-<timestamp>` efêmero).
+    creatingAssistant = true
+    let newAssistant: AssistantView
+    try {
+      const res = await invoke<{ assistantId: string }>('create_assistant', {
+        name,
+        category,
+        prompt,
+      })
+      newAssistant = { id: res.assistantId, name, category, prompt }
+    } catch (err) {
+      console.error('[create_assistant]', err)
+      // Fallback otimista local (sem persistência) — mesmo comportamento antigo.
+      newAssistant = { id: `local-${Date.now()}`, name, category, prompt }
+    } finally {
+      creatingAssistant = false
     }
     assistants = [newAssistant, ...assistants]
     activeOverride = newAssistant.id
+    safeSet(ACTIVE_ASSISTANT_KEY, newAssistant.id)
 
     // Volta para a biblioteca e limpa o formulário.
     view = 'library'
@@ -163,6 +278,17 @@
   style:--surface-content={glassTokens.color.content}
   style:--surface-solid={glassTokens.color.surfaceSolid}
 >
+  <!-- Seletor nativo da importação de prompts (RF-336/338): fora do bloco
+       condicional para sobreviver à troca de view biblioteca -> criador. -->
+  <input
+    class="assistants__import-input"
+    data-assistant-import-input
+    type="file"
+    accept=".md,.txt,.markdown,text/markdown,text/plain"
+    hidden
+    bind:this={importInput}
+    onchange={onImportFileChange}
+  />
   {#if view === 'library'}
     <GlassPanel surface="home">
       <section class="assistants__library" data-assistant-library>
@@ -200,19 +326,35 @@
           <div class="assistants__list">
             {#each pagination.items as assistant (assistant.id)}
               <button
-                class="assistants__row"
+                class="arow"
                 type="button"
                 data-assistant-row={assistant.id}
                 data-assistant-active={activeAssistantId === assistant.id ? 'true' : undefined}
                 onclick={() => selectAssistant(assistant.id)}
               >
-                <strong class="assistants__row-name" data-assistant-name>{assistant.name}</strong>
-                <span class="assistants__row-category" data-assistant-category>
-                  {ASSISTANT_CATEGORY_LABELS[assistant.category]}
+                <span class="avatar" aria-hidden="true">{assistant.name.charAt(0).toUpperCase()}</span>
+                <span class="ainfo">
+                  <strong class="aname" data-assistant-name>{assistant.name}</strong>
+                  <span class="acat" data-assistant-category>
+                    {ASSISTANT_CATEGORY_LABELS[assistant.category]}
+                  </span>
                 </span>
-                <span class="assistants__row-prompt" data-assistant-prompt>
+                <span class="aprompt" data-assistant-prompt>
                   {assistant.prompt}
                 </span>
+                {#if activeAssistantId === assistant.id}
+                  <span class="acheck" aria-hidden="true">
+                    <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
+                      <path
+                        d="M2 6l3 3 5-5"
+                        stroke="white"
+                        stroke-width="1.8"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      />
+                    </svg>
+                  </span>
+                {/if}
               </button>
             {/each}
           </div>
@@ -283,7 +425,7 @@
           class="assistants__create"
           data-assistant-create
           type="button"
-          onclick={createAssistant}
+          onclick={() => void createAssistant()}
         >
           Criar assistente
         </button>
@@ -299,108 +441,185 @@
 
   .assistants__toolbar {
     display: flex;
-    gap: 0.8rem;
+    gap: 1rem;
     align-items: center;
     flex-wrap: wrap;
     margin-bottom: 1.2rem;
+    padding-bottom: 1.4rem;
+    border-bottom: 0.1rem solid var(--rim);
   }
 
   .assistants__search {
     flex: 1;
     min-width: 16rem;
-    padding: 0.6rem 1rem;
+    padding: 0.7rem 1.2rem;
     font: inherit;
-    color: var(--surface-content);
-    background: var(--surface-fill);
-    border: 0.1rem solid var(--surface-border);
+    font-size: 1.2rem;
+    color: var(--text-p);
+    background: rgba(255, 255, 255, 0.04);
+    border: 0.1rem solid var(--rim);
     border-radius: 0.8rem;
   }
 
   .assistants__category-filter {
-    padding: 0.6rem 0.8rem;
+    padding: 0.7rem 1rem;
     font: inherit;
-    color: var(--surface-content);
-    background: var(--surface-fill);
-    border: 0.1rem solid var(--surface-border);
-    border-radius: 0.8rem;
+    font-size: 1.2rem;
+    color: var(--text-s);
+    background: rgba(255, 255, 255, 0.05);
+    border: 0.1rem solid var(--rim);
+    border-radius: 2rem;
   }
 
   .assistants__tool,
   .assistants__page-button,
-  .assistants__back,
-  .assistants__create {
-    padding: 0.6rem 1.2rem;
+  .assistants__back {
+    padding: 5px 1.2rem;
     font: inherit;
-    color: var(--surface-content);
-    background: var(--surface-fill);
-    border: 0.1rem solid var(--surface-border);
-    border-radius: 0.8rem;
+    font-size: 1.1rem;
+    font-weight: 500;
+    color: var(--text-s);
+    background: rgba(255, 255, 255, 0.06);
+    border: 0.1rem solid var(--rim);
+    border-radius: 6px;
     cursor: pointer;
+    transition:
+      background 0.12s,
+      color 0.12s;
+  }
+
+  .assistants__tool:hover,
+  .assistants__page-button:hover:not(:disabled),
+  .assistants__back:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-p);
   }
 
   .assistants__tool--primary,
   .assistants__create {
-    color: var(--surface-solid);
-    background: var(--surface-content);
-    border-color: var(--surface-content);
+    color: #fff;
+    background: var(--iris);
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+
+  .assistants__tool--primary:hover,
+  .assistants__create:hover {
+    opacity: 0.88;
+    background: var(--iris);
+    color: #fff;
   }
 
   .assistants__tool:disabled,
   .assistants__page-button:disabled {
-    opacity: 0.4;
-    cursor: default;
+    opacity: 0.35;
+    cursor: not-allowed;
   }
 
   .assistants__list {
     display: flex;
     flex-direction: column;
-    gap: 0.8rem;
+    gap: 1px;
   }
 
-  .assistants__row {
+  /* ── Linha de assistente (mock: .arow) ── */
+  .arow {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     gap: 0.2rem 1.2rem;
-    align-items: baseline;
+    align-items: center;
     width: 100%;
     padding: 1rem 1.2rem;
     font: inherit;
     text-align: left;
-    color: var(--surface-content);
-    background: var(--surface-fill);
-    border: 0.1rem solid var(--surface-border);
-    border-radius: 0.8rem;
+    color: var(--text-p);
+    background: transparent;
+    border: 0.1rem solid transparent;
+    border-radius: 0.9rem;
     cursor: pointer;
+    transition: background 0.1s;
   }
 
-  .assistants__row[data-assistant-active='true'] {
-    outline: 0.2rem solid var(--surface-content);
-    outline-offset: -0.2rem;
+  .arow:hover {
+    background: rgba(255, 255, 255, 0.04);
   }
 
-  .assistants__row-name {
+  .arow:focus-visible {
+    outline: 2px solid var(--iris);
+  }
+
+  .arow[data-assistant-active='true'] {
+    background: var(--iris-dim);
+    border-color: rgba(90, 87, 232, 0.25);
+  }
+
+  .avatar {
+    grid-row: 1 / span 2;
+    width: 3.6rem;
+    height: 3.6rem;
+    border-radius: 1rem;
+    background: rgba(255, 255, 255, 0.07);
+    border: 0.1rem solid var(--rim);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: var(--text-s);
+    flex-shrink: 0;
+  }
+
+  .arow[data-assistant-active='true'] .avatar {
+    background: rgba(90, 87, 232, 0.2);
+    color: var(--iris);
+    border-color: rgba(90, 87, 232, 0.3);
+  }
+
+  .ainfo {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .aname {
+    font-size: 1.3rem;
     font-weight: 600;
   }
 
-  .assistants__row-category {
-    justify-self: end;
-    font-size: 1.2rem;
-    opacity: 0.75;
+  .acat {
+    font-size: 1.1rem;
+    color: var(--text-t);
   }
 
-  .assistants__row-prompt {
-    grid-column: 1 / -1;
-    font-size: 1.2rem;
-    opacity: 0.8;
+  .aprompt {
+    grid-column: 2;
+    font-size: 1.1rem;
+    color: var(--text-t);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-line-clamp: 1;
+    line-clamp: 1;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .acheck {
+    grid-row: 1 / span 2;
+    width: 1.8rem;
+    height: 1.8rem;
+    border-radius: 50%;
+    background: var(--iris);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
   }
 
   .assistants__empty {
     margin: 0;
     padding: 2rem 0;
     text-align: center;
-    opacity: 0.75;
+    color: var(--text-s);
   }
 
   .assistants__pagination {
@@ -409,6 +628,12 @@
     align-items: center;
     justify-content: center;
     margin-top: 1.2rem;
+  }
+
+  .assistants__page-indicator {
+    font-size: 1.1rem;
+    color: var(--text-t);
+    font-variant-numeric: tabular-nums;
   }
 
   .assistants__creator {
@@ -426,6 +651,7 @@
   .assistants__creator-title {
     margin: 0;
     font-size: 1.6rem;
+    color: var(--text-p);
   }
 
   .assistants__field {
@@ -433,16 +659,16 @@
     flex-direction: column;
     gap: 0.4rem;
     font-size: 1.2rem;
-    opacity: 0.85;
+    color: var(--text-s);
   }
 
   .assistants__name-input,
   .assistants__category-select {
     padding: 0.6rem 1rem;
     font: inherit;
-    color: var(--surface-content);
-    background: var(--surface-fill);
-    border: 0.1rem solid var(--surface-border);
+    color: var(--text-p);
+    background: rgba(255, 255, 255, 0.04);
+    border: 0.1rem solid var(--rim);
     border-radius: 0.8rem;
   }
 
@@ -454,10 +680,13 @@
 
   .assistants__field-label {
     font-size: 1.2rem;
-    opacity: 0.85;
+    color: var(--text-s);
   }
 
   .assistants__create {
     align-self: flex-start;
+    padding: 0.6rem 1.4rem;
+    font-size: 1.2rem;
+    border-radius: 0.7rem;
   }
 </style>

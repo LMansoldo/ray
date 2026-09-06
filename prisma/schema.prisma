@@ -24,7 +24,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
@@ -33,85 +33,25 @@ datasource db {
 // =====================================================================
 
 /// Modo de conexão de um provedor de IA (ADR-006 / RF-401).
-enum ProviderConnectionMode {
-  API_KEY // chave de API (DeepSeek, Anthropic, Gemini, OpenAI)
-  SUBSCRIPTION // login por assinatura (ChatGPT), sem chave
-  AGGREGATOR // OpenRouter
-  COMPATIBLE_ENDPOINT // endpoint compatível com OpenAI (vLLM, LocalAI, self-hosted)
-}
 
 /// Identidade do provedor. GENERIC cobre endpoints compatíveis sem marca.
-enum ProviderKind {
-  OPENAI
-  ANTHROPIC
-  GEMINI
-  DEEPSEEK
-  OPENROUTER
-  GENERIC
-}
 
 /// Função à qual um provedor/modelo pode ser atribuído (RF-300).
 /// A resolução de credencial por "grupo de provedor" acontece por função.
-enum AiFunction {
-  TRANSCRIPTION
-  ANALYSIS
-  TRANSLATION
-}
 
 /// Motor de STT efetivamente usado numa sessão (ADR-007).
-enum SttEngine {
-  APPLE_SPEECH // macOS nativo, on-device
-  WHISPER_LOCAL // whisper.cpp embutido (Windows/Linux)
-  CLOUD // via provedor (OpenAI/Gemini)
-}
 
 /// Qual lado falou num segmento de transcrição (canais VOCÊ / OUTROS).
-enum Speaker {
-  SELF // VOCÊ (microfone do usuário)
-  OTHERS // OUTROS (áudio recebido)
-}
 
 /// Categoria de um assistente na biblioteca (RF-336).
-enum AssistantCategory {
-  GENERAL
-  MEETINGS
-  SALES
-  TRANSLATION
-  INTERVIEW
-  STUDY
-  CUSTOM
-}
 
 /// Origem de um assistente: embarcado no app vs. criado pelo usuário (RF-338).
-enum AssistantSource {
-  BUILTIN
-  USER
-}
 
 /// O que disparou uma sugestão do copiloto (RF-332/333).
-enum SuggestionTrigger {
-  AUTO // geração automática a partir da transcrição
-  ANALYZE_CONVERSATION // ação "Analisar Conversa"
-  SCREEN_CAPTURE // ação "Capturar Tela"
-  ASK_ANYTHING // prompt livre "Perguntar Algo"
-  ANALYZE_SELECTION // "Analisar Seleção" (texto selecionado)
-}
 
 /// Estado de uma sessão.
-enum SessionStatus {
-  ACTIVE
-  PAUSED
-  ENDED
-}
 
 /// Plataforma de reunião detectada/associada à sessão (informativo).
-enum MeetingPlatform {
-  ZOOM
-  GOOGLE_MEET
-  MICROSOFT_TEAMS
-  HANGOUTS
-  OTHER
-}
 
 // =====================================================================
 // USUÁRIO E CONFIGURAÇÕES
@@ -149,8 +89,8 @@ model Settings {
 
   // Toggles de recursos (RF-700) e mapa de atalhos (RF-600) como JSON.
   // A forma canônica desses objetos é definida em types/ e validada no sidecar.
-  features   Json @default("{}")
-  shortcuts  Json @default("{}")
+  features   String @default("{}")
+  shortcuts  String @default("{}")
 
   // Retenção de sessões em dias; null = manter indefinidamente (RNF-204).
   retentionDays Int?
@@ -175,8 +115,8 @@ model ApiKeyRef {
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  kind           ProviderKind
-  connectionMode ProviderConnectionMode
+  kind           String
+  connectionMode String
   // Rótulo amigável definido pelo usuário (ex.: "OpenAI pessoal").
   label          String
   // Ponteiro opaco para o item no cofre nativo (NÃO é o segredo).
@@ -185,6 +125,8 @@ model ApiKeyRef {
   baseUrl        String?
   // Última validação bem-sucedida (RF-403). Null = nunca validada.
   lastValidatedAt DateTime?
+  // Slot de provedor na UI: 'openai' | 'anthropic' | 'deepseek' | etc.
+  slot           String   @default("")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -192,6 +134,7 @@ model ApiKeyRef {
   // Atribuições desta credencial a funções (transcrição/análise/tradução).
   assignments ProviderAssignment[]
 
+  @@unique([userId, slot])
   @@unique([userId, kind, label])
   @@index([userId])
 }
@@ -200,7 +143,7 @@ model ApiKeyRef {
 /// A unicidade por (user, function) reflete "um provedor ativo por função".
 model ProviderAssignment {
   id       String     @id @default(cuid())
-  function AiFunction
+  function String
   // Modelo escolhido no provedor (ex.: "gpt-4o", "claude-sonnet-5"). Null = padrão do provedor.
   model    String?
 
@@ -230,8 +173,8 @@ model Assistant {
   user     User?             @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   name     String
-  category AssistantCategory
-  source   AssistantSource   @default(USER)
+  category String
+  source   String   @default("USER")
   // O prompt de sistema que define a capacidade do assistente.
   prompt   String
   // Ícone/emoji opcional para a biblioteca.
@@ -257,15 +200,15 @@ model Session {
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  status   SessionStatus   @default(ACTIVE)
-  platform MeetingPlatform @default(OTHER)
+  status   String   @default("ACTIVE")
+  platform String @default("OTHER")
 
   // Idiomas em uso na sessão.
   sourceLanguage String?
   targetLanguage String?
 
   // Motor de STT efetivamente usado (ADR-007), para diagnóstico e métricas.
-  sttEngine SttEngine?
+  sttEngine String?
 
   // Assistente ativo no momento da sessão.
   assistantId String?
@@ -294,7 +237,7 @@ model TranscriptSegment {
   sessionId String
   session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
-  speaker Speaker
+  speaker String
   // Texto original transcrito.
   text    String
   // Tradução para o idioma-alvo (RF-303). Null se não traduzido.
@@ -315,7 +258,7 @@ model Suggestion {
   sessionId String
   session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
-  trigger SuggestionTrigger
+  trigger String
 
   // Campos do card canônico (RF-331): contexto, "ELES DISSERAM", "DIGA ISSO".
   contextLabel String? // ex.: "Você está em uma entrevista técnica"
@@ -323,7 +266,7 @@ model Suggestion {
   sayThis      String // a resposta sugerida (conteúdo principal)
 
   // Rastreabilidade: qual provedor/modelo produziu a sugestão.
-  providerKind ProviderKind?
+  providerKind String?
   model        String?
 
   createdAt DateTime @default(now())
@@ -339,7 +282,7 @@ model Summary {
 
   // Texto do resumo e itens de ação (lista de strings) como JSON.
   text        String
-  actionItems Json @default("[]")
+  actionItems String @default("[]")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

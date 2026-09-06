@@ -234,7 +234,8 @@ vi.mock("./db.js", () => {
               id,
               sessionId: data.sessionId as string,
               text: data.text as string,
-              actionItems: JSON.stringify(data.actionItems ?? []),
+              // Coluna String no SQLite: handler ja serializa.
+              actionItems: (data.actionItems as string) ?? "[]",
               createdAt: now,
               updatedAt: now,
             };

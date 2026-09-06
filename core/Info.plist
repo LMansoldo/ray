@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- TCC: dialogs de permissao exigem estas chaves (sem elas o macOS
+       aborta o processo na chamada das APIs). Mescladas no Info.plist
+       pelo bundler (tauri procura Info.plist junto ao tauri.conf.json). -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>O Ray precisa do microfone para transcrever suas falas durante reunioes (canal VOCE).</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>O Ray usa reconhecimento de fala local (on-device) para transcrever o audio capturado.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>O Ray captura a tela para dar contexto visual as analises do copiloto.</string>
+  <!-- Sem icone na Dock: o Ray vive apenas na barra de menu (tray). -->
+  <key>LSUIElement</key>
+  <true/>
+</dict>
+</plist>

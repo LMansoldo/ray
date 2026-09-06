@@ -21,30 +21,32 @@ describe('glassTokens — camadas de token (SRS 8.3)', () => {
 
 describe('glassTokens — valores fixados pelo contrato', () => {
   it('fixa a cor translúcida da superfície', () => {
-    expect(glassTokens.color.surface).toBe('rgba(255, 255, 255, 0.56)')
+    expect(glassTokens.color.surface).toBe('rgba(22, 24, 36, 0.9)')
   })
 
   it('fixa a cor sólida do fallback', () => {
-    expect(glassTokens.color.surfaceSolid).toBe('rgb(248, 246, 250)')
+    expect(glassTokens.color.surfaceSolid).toBe('rgb(22, 24, 36)')
   })
 
   it('fixa a borda de vidro e a cor de conteúdo', () => {
-    expect(glassTokens.color.border).toBe('rgba(255, 255, 255, 0.64)')
-    expect(glassTokens.color.content).toBe('rgb(24, 22, 31)')
+    expect(glassTokens.color.border).toBe('rgba(255, 255, 255, 0.09)')
+    expect(glassTokens.color.content).toBe('rgb(240, 240, 248)')
   })
 
   it('fixa o raio de blur em rem', () => {
-    expect(glassTokens.blur.surface).toBe('1.6rem')
+    expect(glassTokens.blur.surface).toBe('2rem')
   })
 
   it('fixa a camada de refração como gradiente', () => {
     expect(glassTokens.refraction.sheen).toBe(
-      'linear-gradient(135deg, rgba(255, 255, 255, 0.85) 0%, rgba(255, 255, 255, 0.08) 100%)',
+      'linear-gradient(180deg, rgba(255, 255, 255, 0.06) 0%, transparent 50%)',
     )
   })
 
   it('fixa o sombreamento de fundo atrás dos painéis', () => {
-    expect(glassTokens.shadow.background).toBe('0 0.8rem 3.2rem rgba(8, 6, 13, 0.28)')
+    expect(glassTokens.shadow.background).toBe(
+      '0 2rem 6rem rgba(0, 0, 0, 0.55), 0 0.2rem 0.8rem rgba(0, 0, 0, 0.30)',
+    )
   })
 
   it('fixa raio e respiro da superfície em rem', () => {

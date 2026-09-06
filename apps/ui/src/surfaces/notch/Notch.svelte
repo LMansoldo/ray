@@ -87,7 +87,7 @@
 
   $effect(() => {
     let cancelled = false
-    let unlisten: (() => void) | undefined
+    const unlisteners: Array<() => void> = []
 
     // Uma assinatura por montagem, nunca por evento; o cancelamento acontece
     // no unmount (frontend.md).
@@ -100,12 +100,22 @@
         stopListening()
         return
       }
-      unlisten = stopListening
+      unlisteners.push(stopListening)
     })
+
+    // RF-334 via atalho global: o App (janela main) traduz
+    // notchPreviousInsight/notchNextInsight em evento DOM ray:notch-nav.
+    const onNav = (event: Event): void => {
+      const dir = (event as CustomEvent<{ dir?: string }>).detail?.dir
+      if (dir === 'prev') goPrevious()
+      else if (dir === 'next') goNext()
+    }
+    window.addEventListener('ray:notch-nav', onNav)
+    unlisteners.push(() => window.removeEventListener('ray:notch-nav', onNav))
 
     return () => {
       cancelled = true
-      unlisten?.()
+      unlisteners.forEach((fn) => fn())
     }
   })
 
@@ -139,82 +149,202 @@
 
 <div class="notch" data-notch data-notch-material={material}>
   <GlassPanel mode={material} surface="notch">
-    <nav class="notch__nav" aria-label="Histórico de insights">
-      <button
-        type="button"
-        class="notch__nav-button"
-        data-notch-prev
-        disabled={viewIndex === 0}
-        onclick={goPrevious}
-      >
-        Anterior
-      </button>
-      <button
-        type="button"
-        class="notch__nav-button"
-        data-notch-next
-        disabled={viewIndex === history.length}
-        onclick={goNext}
-      >
-        Próximo
-      </button>
-    </nav>
+    <div class="notch__strip">
+      <span
+        class="live-dot"
+        class:live-dot--off={displayStatus !== 'streaming'}
+        title={displayStatus === 'streaming' ? 'Ao vivo' : undefined}
+        aria-hidden="true"
+      ></span>
 
-    {#if displayStatus !== 'idle'}
-      <section class="notch__insight" data-notch-insight data-notch-status={displayStatus}>
-        <div
-          class="notch__body"
-          data-notch-body
-          bind:this={scrollBody}
-          onscroll={handleScroll}
+      {#if displayStatus !== 'idle'}
+        <section class="notch__insight" data-notch-insight data-notch-status={displayStatus}>
+          <div
+            class="notch__body"
+            data-notch-body
+            bind:this={scrollBody}
+            onscroll={handleScroll}
+          >
+            <MarkdownView markdown={displayText} />
+          </div>
+        </section>
+      {:else}
+        <span class="notch__idle">Aguardando insights...</span>
+      {/if}
+
+      {#if displayStatus === 'error'}
+        <p class="notch__error" data-notch-error role="alert">
+          {displayError?.message ?? ''}
+        </p>
+      {/if}
+
+      <nav class="notch__nav" aria-label="Histórico de insights">
+        <button
+          type="button"
+          class="nbtn"
+          data-notch-prev
+          aria-label="Anterior"
+          disabled={viewIndex === 0}
+          onclick={goPrevious}
         >
-          <MarkdownView markdown={displayText} />
-        </div>
-        {#if displayStatus === 'error'}
-          <p class="notch__error" data-notch-error role="alert">
-            {displayError?.message ?? ''}
-          </p>
-        {/if}
-      </section>
-    {/if}
+          <svg width="7" height="7" viewBox="0 0 8 8" fill="none" aria-hidden="true">
+            <path
+              d="M5 1L2 4l3 3"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+        <span class="nctr">{Math.min(viewIndex + 1, history.length + 1)} / {history.length + 1}</span>
+        <button
+          type="button"
+          class="nbtn"
+          data-notch-next
+          aria-label="Próximo"
+          disabled={viewIndex === history.length}
+          onclick={goNext}
+        >
+          <svg width="7" height="7" viewBox="0 0 8 8" fill="none" aria-hidden="true">
+            <path
+              d="M3 1l3 3-3 3"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+      </nav>
+    </div>
   </GlassPanel>
 </div>
 
 <style>
   .notch {
-    max-width: 34rem;
+    width: min(68rem, 92%);
   }
 
-  .notch__nav {
+  /* Faixa compacta horizontal (mock: .notch-strip) */
+  .notch__strip {
     display: flex;
+    align-items: center;
     gap: 0.8rem;
-    margin-bottom: 0.8rem;
+    height: 4.8rem;
+    padding: 0 1.2rem;
+    position: relative;
+    overflow: hidden;
   }
 
-  .notch__nav-button {
-    font: inherit;
-    font-size: 1.2rem;
-    padding: 0.4rem 0.9rem;
-    border-radius: 0.8rem;
-    cursor: pointer;
+  .live-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--green);
+    flex-shrink: 0;
+    box-shadow: 0 0 6px rgba(48, 209, 88, 0.55);
+    animation: pulse 2s ease infinite;
+  }
+
+  .live-dot--off {
+    background: var(--text-t);
+    box-shadow: none;
+    animation: none;
+  }
+
+  @keyframes pulse {
+    0%,
+    100% {
+      opacity: 1;
+      box-shadow: 0 0 6px rgba(48, 209, 88, 0.55);
+    }
+    50% {
+      opacity: 0.65;
+      box-shadow: 0 0 3px rgba(48, 209, 88, 0.3);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .live-dot {
+      animation: none !important;
+    }
   }
 
   .notch__insight {
+    flex: 1;
+    min-width: 0;
     display: flex;
-    flex-direction: column;
-    gap: 0.8rem;
+  }
+
+  .notch__idle {
+    flex: 1;
+    font-size: 1.2rem;
+    color: var(--text-t);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
   }
 
   .notch__body {
-    max-height: 18rem;
+    flex: 1;
+    min-width: 0;
+    max-height: 4.8rem;
     overflow-y: auto;
-    padding-right: 0.4rem;
-    font-size: 1.4rem;
+    font-size: 1.2rem;
+    color: var(--text-s);
+    white-space: nowrap;
+    overflow-x: hidden;
   }
 
   .notch__error {
     margin: 0;
-    padding: 0.6rem 0.8rem;
-    font-size: 1.2rem;
+    font-size: 1.1rem;
+    color: var(--error);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex-shrink: 1;
+    min-width: 0;
+  }
+
+  .notch__nav {
+    display: flex;
+    gap: 2px;
+    align-items: center;
+    flex-shrink: 0;
+  }
+
+  .nbtn {
+    width: 2.4rem;
+    height: 2.4rem;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 0.1rem solid var(--rim);
+    color: var(--text-t);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 0.1s;
+    padding: 0;
+  }
+
+  .nbtn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-p);
+  }
+
+  .nbtn:disabled {
+    opacity: 0.35;
+    cursor: default;
+  }
+
+  .nctr {
+    font-size: 1.1rem;
+    color: var(--text-t);
+    font-variant-numeric: tabular-nums;
+    padding: 0 4px;
   }
 </style>

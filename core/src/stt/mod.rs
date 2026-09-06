@@ -77,22 +77,32 @@ pub(crate) fn install_mock<E: SttEngine + 'static>(engine: E, f: impl FnOnce()) 
 // Motor persistente (sliding window — ADR-007 janela deslizante)
 // ---------------------------------------------------------------------------
 
-static ENGINE: Mutex<Option<Box<dyn SttEngine>>> = Mutex::new(None);
+/// Um motor por falante: SELF (mic) e OTHERS (áudio do sistema) têm streams
+/// independentes — compartilhar um engine misturaria as janelas de áudio.
+static ENGINES: Mutex<Option<std::collections::HashMap<Speaker, Box<dyn SttEngine>>>> =
+    Mutex::new(None);
 
-/// Retorna referência mutável ao motor persistente, inicializando se necessário.
-fn get_or_create_engine() -> Result<std::sync::MutexGuard<'static, Option<Box<dyn SttEngine>>>, SttError> {
-    let mut guard = ENGINE.lock().map_err(|_| {
+/// Retorna o motor do falante, inicializando se necessário.
+fn get_or_create_engine(
+    speaker: &Speaker,
+) -> Result<std::sync::MutexGuard<'static, Option<std::collections::HashMap<Speaker, Box<dyn SttEngine>>>>, SttError> {
+    let mut guard = ENGINES.lock().map_err(|_| {
         SttError::EngineUnavailable("engine lock poisoned".into())
     })?;
     if guard.is_none() {
-        *guard = Some(create_engine()?);
+        *guard = Some(std::collections::HashMap::new());
+    }
+    let map = guard.as_mut().unwrap();
+    if !map.contains_key(speaker) {
+        let engine = create_engine()?;
+        map.insert(speaker.clone(), engine);
     }
     Ok(guard)
 }
 
-/// Reseta o motor persistente (para isolamento entre testes e sessões).
+/// Reseta os motores persistentes (para isolamento entre testes e sessões).
 pub fn reset_engine() {
-    if let Ok(mut guard) = ENGINE.lock() {
+    if let Ok(mut guard) = ENGINES.lock() {
         *guard = None;
     }
 }
@@ -124,11 +134,63 @@ fn create_engine() -> Result<Box<dyn SttEngine>, SttError> {
 
 #[cfg(target_os = "macos")]
 struct AppleSpeechEngine {
-    /// PCM acumulado entre chamadas (janela deslizante).
+    inner: AppleSpeechInner,
+}
+
+#[cfg(target_os = "macos")]
+enum AppleSpeechInner {
+    /// SFSpeechRecognizer REAL (on-device) — usado quando a permissão de
+    /// Reconhecimento de Fala está concedida (app empacotado com Info.plist).
+    Real(sfs::SfsProxy),
+    /// Placeholder de janelas — fallback quando o Speech não está autorizado
+    /// (ex.: `cargo test`, CI, usuário negou). Mantém o pipeline funcionando
+    /// e os testes de produção verdes sem depender de TCC.
+    Placeholder(PlaceholderWindows),
+}
+
+#[cfg(target_os = "macos")]
+impl AppleSpeechEngine {
+    fn new() -> Result<Self, SttError> {
+        let inner = match sfs::SfsProxy::spawn() {
+            Some(real) => {
+                eprintln!("[stt] Apple Speech REAL ativo (on-device)");
+                AppleSpeechInner::Real(real)
+            }
+            None => {
+                eprintln!("[stt] Apple Speech indisponível/nao autorizado — placeholder de janelas");
+                AppleSpeechInner::Placeholder(PlaceholderWindows::new())
+            }
+        };
+        Ok(Self { inner })
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl SttEngine for AppleSpeechEngine {
+    fn feed_pcm(&mut self, pcm: &[i16]) -> Result<Vec<EngineSegment>, SttError> {
+        match &mut self.inner {
+            AppleSpeechInner::Real(e) => e.feed_pcm(pcm),
+            AppleSpeechInner::Placeholder(e) => e.feed_pcm(pcm),
+        }
+    }
+
+    fn finalize(&mut self) -> Result<Vec<EngineSegment>, SttError> {
+        match &mut self.inner {
+            AppleSpeechInner::Real(e) => e.finalize(),
+            AppleSpeechInner::Placeholder(e) => e.finalize(),
+        }
+    }
+
+    fn engine_name(&self) -> &str {
+        "apple_speech"
+    }
+}
+
+/// Lógica de janelas do placeholder (extraída do stub original).
+#[cfg(target_os = "macos")]
+struct PlaceholderWindows {
     accumulated_pcm: Vec<i16>,
-    /// Total de samples processados (para calculo de offsets).
     total_samples_processed: usize,
-    /// Contador de janelas emitidas (para texto sintetizado).
     window_count: usize,
 }
 
@@ -136,41 +198,39 @@ struct AppleSpeechEngine {
 const APPLE_SPEECH_WINDOW_SIZE: usize = 16_000; // 1s @ 16kHz
 
 #[cfg(target_os = "macos")]
-impl AppleSpeechEngine {
-    fn new() -> Result<Self, SttError> {
-        Ok(Self {
+impl PlaceholderWindows {
+    fn new() -> Self {
+        Self {
             accumulated_pcm: Vec::new(),
             total_samples_processed: 0,
             window_count: 0,
-        })
+        }
     }
 
-    /// Processa audio acumulado, drenando janelas completas.
-    fn drain_windows(&mut self) -> Vec<EngineSegment> {
-        let mut segments = Vec::new();
-        while self.accumulated_pcm.len() >= APPLE_SPEECH_WINDOW_SIZE {
-            let _window: Vec<i16> =
-                self.accumulated_pcm.drain(..APPLE_SPEECH_WINDOW_SIZE).collect();
-            let start_ms = (self.total_samples_processed as f64 / 16.0) as i32;
-            self.total_samples_processed += APPLE_SPEECH_WINDOW_SIZE;
-            let end_ms = (self.total_samples_processed as f64 / 16.0) as i32;
-            self.window_count += 1;
-            segments.push(EngineSegment {
-                text: format!("[segmento {}]", self.window_count),
-                translated_text: None,
-                start_ms,
-                end_ms,
-            });
+    fn push_placeholder(&mut self, sample_count: usize) -> EngineSegment {
+        let start_ms = (self.total_samples_processed as f64 / 16.0) as i32;
+        self.total_samples_processed += sample_count;
+        let end_ms = (self.total_samples_processed as f64 / 16.0) as i32;
+        self.window_count += 1;
+        EngineSegment {
+            text: format!("[segmento {}]", self.window_count),
+            translated_text: None,
+            start_ms,
+            end_ms,
         }
-        segments
     }
 }
 
 #[cfg(target_os = "macos")]
-impl SttEngine for AppleSpeechEngine {
+impl SttEngine for PlaceholderWindows {
     fn feed_pcm(&mut self, pcm: &[i16]) -> Result<Vec<EngineSegment>, SttError> {
         self.accumulated_pcm.extend_from_slice(pcm);
-        Ok(self.drain_windows())
+        let mut segments = Vec::new();
+        while self.accumulated_pcm.len() >= APPLE_SPEECH_WINDOW_SIZE {
+            self.accumulated_pcm.drain(..APPLE_SPEECH_WINDOW_SIZE);
+            segments.push(self.push_placeholder(APPLE_SPEECH_WINDOW_SIZE));
+        }
+        Ok(segments)
     }
 
     fn finalize(&mut self) -> Result<Vec<EngineSegment>, SttError> {
@@ -178,17 +238,8 @@ impl SttEngine for AppleSpeechEngine {
             return Ok(vec![]);
         }
         let len = self.accumulated_pcm.len();
-        let start_ms = (self.total_samples_processed as f64 / 16.0) as i32;
-        self.total_samples_processed += len;
-        let end_ms = (self.total_samples_processed as f64 / 16.0) as i32;
         self.accumulated_pcm.clear();
-        self.window_count += 1;
-        Ok(vec![EngineSegment {
-            text: format!("[segmento {}]", self.window_count),
-            translated_text: None,
-            start_ms,
-            end_ms,
-        }])
+        Ok(vec![self.push_placeholder(len)])
     }
 
     fn engine_name(&self) -> &str {
@@ -197,22 +248,296 @@ impl SttEngine for AppleSpeechEngine {
 }
 
 // ===========================================================================
-// Whisper.cpp — Windows/Linux (ADR-007)
+// SFSpeechRecognizer REAL — on-device (ADR-007), via objc2 puro.
 //
-// Estado persistente: acumula PCM entre chamadas (janela deslizante).
-// ADR-007: "Windows e Linux: Whisper via whisper.cpp embutido, rodando
-// em CPU sem depender de GPU."
-// Janela de 2.5s (40000 samples @ 16kHz) para throughput de CPU.
+// Janela de 6s: áudio entra como AVAudioPCMBuffer int16 mono 16k; ao fechar
+// a janela, endAudio → resultado final → segmento; novo request emenda.
 // ===========================================================================
 
-#[cfg(not(target_os = "macos"))]
-struct WhisperCppEngine {
-    /// PCM acumulado entre chamadas (janela deslizante).
-    accumulated_pcm: Vec<i16>,
-    /// Total de samples processados (para calculo de offsets).
-    total_samples_processed: usize,
-    /// Contador de janelas emitidas (para texto sintetizado).
-    window_count: usize,
+#[cfg(target_os = "macos")]
+mod sfs {
+    use super::{EngineSegment, SttError};
+    use block2::RcBlock;
+    use objc2::rc::Retained;
+    use objc2::AllocAnyThread;
+    use core::ptr::NonNull;
+    use objc2_avf_audio::{AVAudioCommonFormat, AVAudioFormat, AVAudioPCMBuffer};
+    use objc2_speech::{
+        SFSpeechAudioBufferRecognitionRequest, SFSpeechRecognizer,
+        SFSpeechRecognizerAuthorizationStatus,
+    };
+    use std::sync::mpsc::{self, Receiver};
+    use std::time::{Duration, Instant};
+
+    /// Duração do segmento emitido (ms). 6s equilibra latência e acurácia.
+    const SEGMENT_MS: i32 = 6_000;
+    /// Samples por ms @ 16kHz mono.
+    const SAMPLES_PER_MS: f64 = 16.0;
+    /// Timeout do resultado final do recognizer.
+    const FINAL_TIMEOUT: Duration = Duration::from_secs(4);
+
+    pub(super) struct SfsEngine {
+        recognizer: Retained<SFSpeechRecognizer>,
+        format: Retained<AVAudioFormat>,
+        request: Option<Retained<SFSpeechAudioBufferRecognitionRequest>>,
+        task: Option<Retained<objc2_speech::SFSpeechRecognitionTask>>,
+        /// Handler vivo enquanto o request existe (ObjC retém o block, mas
+        /// mantemos por clareza de ciclo de vida).
+        rx: Receiver<(String, bool)>,
+        segment_start_ms: i32,
+        pending_ms: i32,
+    }
+
+    impl SfsEngine {
+        /// Cria o engine; None quando Speech não está autorizado (o caller
+        /// cai para o placeholder de janelas).
+        pub(super) fn new() -> Option<Self> {
+            if unsafe { SFSpeechRecognizer::authorizationStatus() }
+                != SFSpeechRecognizerAuthorizationStatus::Authorized
+            {
+                return None;
+            }
+            // Sem locale explícito: usa o locale do dispositivo (ADR-007).
+            let recognizer = unsafe { SFSpeechRecognizer::init(SFSpeechRecognizer::alloc())? };
+            unsafe { recognizer.setSupportsOnDeviceRecognition(true) };
+
+            // AVAudioCommonFormat.pcmFormatInt16; mono 16kHz, não-interleaved.
+            let format = unsafe {
+                AVAudioFormat::initWithCommonFormat_sampleRate_channels_interleaved(
+                    AVAudioFormat::alloc(),
+                    AVAudioCommonFormat::PCMFormatInt16,
+                    16_000.0,
+                    1,
+                    false,
+                )?
+            };
+
+            let (request, task, rx) = Self::new_request(&recognizer)?;
+
+            Some(Self {
+                recognizer,
+                format,
+                request: Some(request),
+                task: Some(task),
+                rx,
+                segment_start_ms: 0,
+                pending_ms: 0,
+            })
+        }
+
+        /// Novo request + task com resultHandler → canal (texto, is_final).
+        fn new_request(
+            recognizer: &SFSpeechRecognizer,
+        ) -> Option<(
+            Retained<SFSpeechAudioBufferRecognitionRequest>,
+            Retained<objc2_speech::SFSpeechRecognitionTask>,
+            Receiver<(String, bool)>,
+        )> {
+            let request = unsafe {
+                SFSpeechAudioBufferRecognitionRequest::init(
+                    SFSpeechAudioBufferRecognitionRequest::alloc(),
+                )
+            };
+            unsafe { request.setShouldReportPartialResults(false) };
+
+            let (tx, rx) = mpsc::channel::<(String, bool)>();
+            let handler = RcBlock::new(
+                move |result: *mut objc2_speech::SFSpeechRecognitionResult,
+                      error: *mut objc2_foundation::NSError| {
+                    if !error.is_null() || result.is_null() {
+                        let _ = tx.send((String::new(), true));
+                        return;
+                    }
+                    let r = unsafe { &*result };
+                    let text = unsafe { r.bestTranscription().formattedString().to_string() };
+                    let _ = tx.send((text, true));
+                },
+            );
+            let task = unsafe {
+                recognizer.recognitionTaskWithRequest_resultHandler(&request, &handler)
+            };
+            Some((request, task, rx))
+        }
+
+        /// Anexa um chunk int16 16k mono ao request corrente.
+        fn append_pcm(&self, request: &SFSpeechAudioBufferRecognitionRequest, pcm: &[i16]) {
+            let Some(buffer) = (unsafe {
+                AVAudioPCMBuffer::initWithPCMFormat_frameCapacity(
+                    AVAudioPCMBuffer::alloc(),
+                    &self.format,
+                    pcm.len() as u32,
+                )
+            }) else {
+                return;
+            };
+            unsafe {
+                let dst = buffer.int16ChannelData();
+                if dst.is_null() {
+                    return;
+                }
+                std::ptr::copy_nonoverlapping(pcm.as_ptr(), (*dst).as_ptr(), pcm.len());
+                buffer.setFrameLength(pcm.len() as u32);
+                request.appendAudioPCMBuffer(&buffer);
+            }
+        }
+
+        /// Fecha o segmento: endAudio → aguarda resultado final → emite texto.
+        fn close_segment(&mut self) -> Vec<EngineSegment> {
+            let Some(request) = self.request.take() else {
+                return vec![];
+            };
+            unsafe { request.endAudio() };
+
+            // Consome o canal até o resultado final (ou timeout).
+            let mut text = String::new();
+            let deadline = Instant::now() + FINAL_TIMEOUT;
+            loop {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                match self.rx.recv_timeout(deadline - now) {
+                    Ok((t, true)) => {
+                        text = t;
+                        break;
+                    }
+                    Ok((t, false)) => {
+                        if !t.trim().is_empty() {
+                            text = t;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            drop(request);
+
+            let mut segments = Vec::new();
+            if !text.trim().is_empty() {
+                let start_ms = self.segment_start_ms;
+                let end_ms = start_ms + self.pending_ms;
+                segments.push(EngineSegment {
+                    text: text.trim().to_string(),
+                    translated_text: None,
+                    start_ms,
+                    end_ms,
+                });
+            }
+            self.segment_start_ms += self.pending_ms;
+            self.pending_ms = 0;
+
+            // Novo request para o próximo segmento; em falha o engine
+            // continua sem request (feed_pcm repõe no próximo chunk).
+            if let Some((request, task, rx)) = Self::new_request(&self.recognizer) {
+                self.request = Some(request);
+                self.task = Some(task);
+                self.rx = rx;
+            }
+            segments
+        }
+
+        /// Anexa PCM ao request corrente (recriando-o se necessário).
+        pub(super) fn feed_pcm(&mut self, pcm: &[i16]) -> Result<Vec<EngineSegment>, SttError> {
+            if pcm.is_empty() {
+                return Ok(vec![]);
+            }
+            if self.request.is_none() {
+                if let Some((request, task, rx)) = Self::new_request(&self.recognizer) {
+                    self.request = Some(request);
+                    self.task = Some(task);
+                    self.rx = rx;
+                } else {
+                    return Ok(vec![]);
+                }
+            }
+            let Some(request) = self.request.as_ref() else {
+                return Ok(vec![]);
+            };
+            self.append_pcm(request, pcm);
+            self.pending_ms += (pcm.len() as f64 / SAMPLES_PER_MS) as i32;
+            if self.pending_ms >= SEGMENT_MS {
+                return Ok(self.close_segment());
+            }
+            Ok(vec![])
+        }
+
+        /// Flush do restante do áudio.
+        pub(super) fn finalize(&mut self) -> Result<Vec<EngineSegment>, SttError> {
+            if self.pending_ms > 0 {
+                return Ok(self.close_segment());
+            }
+            Ok(vec![])
+        }
+    }
+
+    /// Mensagem para a thread dedicada do SFSpeech (ObjC não é Send — o
+    /// engine inteiro vive em UMA thread; o resto do app fala por canais).
+    pub(super) enum SfsMsg {
+        Pcm(Vec<i16>),
+        Finalize,
+    }
+
+    /// Proxy `Send` que implementa SttEngine repassando para a thread owner.
+    pub(super) struct SfsProxy {
+        tx: mpsc::Sender<SfsMsg>,
+        rx: mpsc::Receiver<Result<Vec<EngineSegment>, SttError>>,
+    }
+
+    impl SfsProxy {
+        pub(super) fn spawn() -> Option<Self> {
+            let (tx_in, rx_in) = mpsc::channel::<SfsMsg>();
+            let (tx_out, rx_out) = mpsc::channel::<Result<Vec<EngineSegment>, SttError>>();
+            let (tx_ready, rx_ready) = mpsc::channel::<bool>();
+            std::thread::Builder::new()
+                .name("ray-sfspeech".into())
+                .spawn(move || {
+                    let Some(mut engine) = SfsEngine::new() else {
+                        let _ = tx_ready.send(false);
+                        return;
+                    };
+                    let _ = tx_ready.send(true);
+                    while let Ok(msg) = rx_in.recv() {
+                        let result = match msg {
+                            SfsMsg::Pcm(pcm) => engine.feed_pcm(&pcm),
+                            SfsMsg::Finalize => engine.finalize(),
+                        };
+                        if tx_out.send(result).is_err() {
+                            break;
+                        }
+                    }
+                })
+                .ok()?;
+            match rx_ready.recv_timeout(Duration::from_secs(2)) {
+                Ok(true) => Some(Self { tx: tx_in, rx: rx_out }),
+                _ => None,
+            }
+        }
+    }
+
+    impl super::SttEngine for SfsProxy {
+        fn feed_pcm(&mut self, pcm: &[i16]) -> Result<Vec<EngineSegment>, SttError> {
+            if self.tx.send(SfsMsg::Pcm(pcm.to_vec())).is_err() {
+                return Err(SttError::EngineUnavailable("sfs thread died".into()));
+            }
+            match self.rx.recv_timeout(Duration::from_secs(8)) {
+                Ok(result) => result,
+                Err(_) => Err(SttError::TranscriptionFailed("sfs worker timeout".into())),
+            }
+        }
+
+        fn finalize(&mut self) -> Result<Vec<EngineSegment>, SttError> {
+            if self.tx.send(SfsMsg::Finalize).is_err() {
+                return Err(SttError::EngineUnavailable("sfs thread died".into()));
+            }
+            match self.rx.recv_timeout(Duration::from_secs(8)) {
+                Ok(result) => result,
+                Err(_) => Err(SttError::TranscriptionFailed("sfs worker timeout".into())),
+            }
+        }
+
+        fn engine_name(&self) -> &str {
+            "apple_speech_sfs"
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -341,10 +666,12 @@ pub fn process_pcm(
         if let Some(ref mut engine) = *cell.borrow_mut() {
             engine.feed_pcm(pcm)
         } else {
-            let mut guard = get_or_create_engine()?;
-            let engine = guard.as_mut().ok_or_else(|| {
-                SttError::EngineUnavailable("engine not initialized".into())
-            })?;
+            let mut guard = get_or_create_engine(&speaker)?;
+            let engine = guard
+                .as_mut()
+                .ok_or_else(|| SttError::EngineUnavailable("engine not initialized".into()))?
+                .get_mut(&speaker)
+                .ok_or_else(|| SttError::EngineUnavailable("engine not initialized".into()))?;
             engine.feed_pcm(pcm)
         }
     })?;
@@ -361,10 +688,12 @@ pub fn finalize_transcription(
         if let Some(ref mut engine) = *cell.borrow_mut() {
             engine.finalize()
         } else {
-            let mut guard = get_or_create_engine()?;
-            let engine = guard.as_mut().ok_or_else(|| {
-                SttError::EngineUnavailable("engine not initialized".into())
-            })?;
+            let mut guard = get_or_create_engine(&speaker)?;
+            let engine = guard
+                .as_mut()
+                .ok_or_else(|| SttError::EngineUnavailable("engine not initialized".into()))?
+                .get_mut(&speaker)
+                .ok_or_else(|| SttError::EngineUnavailable("engine not initialized".into()))?;
             engine.finalize()
         }
     })?;
@@ -377,7 +706,11 @@ pub fn drain_and_process(
     speaker: Speaker,
     session_id: &str,
 ) -> Result<Vec<AppendTranscriptRequest>, SttError> {
-    let frames = crate::audio::drain_pcm_queue();
+    let channel = match speaker {
+        Speaker::Self_ => crate::audio::AudioChannel::Self_,
+        Speaker::Others => crate::audio::AudioChannel::Others,
+    };
+    let frames = crate::audio::drain_pcm_queue_channel(channel);
     let mut all_requests = Vec::new();
     for frame in frames {
         let requests = process_pcm(&frame, speaker.clone(), session_id)?;

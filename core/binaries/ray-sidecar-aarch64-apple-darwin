@@ -1,15 +1,37 @@
 #!/bin/sh
-# Placeholder inerte para o binário do sidecar (ADR-001/005).
+# Launcher do sidecar Ray (substitui o stub T-501 parcialmente: o binário
+# autocontido via `pkg` segue como TODO — este launcher usa o Node do host).
 #
-# `tauri-build` (invocado por `core/build.rs`) valida, já em `cargo check`,
-# que todo caminho listado em `bundle.externalBin` do tauri.conf.json existe
-# para o target triple do host — por isso este arquivo precisa existir aqui,
-# mesmo antes do sidecar real ser empacotado como binário autocontido via
-# `pkg` (T-501 cuida do empacotamento real por plataforma; T-300 cuida de
-# `sidecar::Sidecar::start` de fato spawnar/supervisionar o processo).
+# Layout esperado no bundle:
+#   Ray.app/Contents/MacOS/ray-sidecar-<triple>   (este script)
+#   Ray.app/Contents/Resources/sidecar/           (dist + prisma + node_modules)
 #
-# Este script NÃO é o sidecar real: não hospeda o agente LangGraph.js nem o
-# Prisma Client, e não deve ser invocado por nenhum código de produção antes
-# de T-300/T-501 substituírem este arquivo pelo binário real.
-echo "ray-sidecar placeholder: not implemented (see T-300, T-501)" >&2
+# O DATABASE_URL (SQLite no app data dir) é injetado pelo núcleo Rust
+# (core/src/sidecar.rs) no ambiente do processo.
+
+DIR=$(cd "$(dirname "$0")" && pwd)
+DIST="dist/server.js"
+
+# Layouts suportados, em ordem:
+#   1. RAY_SIDECAR_RES                     (override explicito)
+#   2. bundle:  ../Resources/resources/sidecar  (tauri preserva o prefixo)
+#   3. bundle:  ../Resources/sidecar       (caso o prefixo sumir)
+#   4. dev:     ../../resources/sidecar    (core/target/<mode>/ -> core/resources/)
+RES_CANDIDATES="${RAY_SIDECAR_RES:-} $DIR/../Resources/resources/sidecar $DIR/../Resources/sidecar $DIR/../../resources/sidecar"
+
+for RES in $RES_CANDIDATES; do
+  if [ -f "$RES/$DIST" ]; then
+    NODE_BAKED="/Users/lucasmansoldo/.nvm/versions/node/v25.8.2/bin/node"
+    for n in "$NODE_BAKED" /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
+      if [ -x "$n" ]; then
+        # import() dinamico: roda ESM sem depender de package.json ("type").
+        exec "$n" -e "const{pathToFileURL}=require('url');import(pathToFileURL(process.argv[1]).href).catch(e=>{console.error(e);process.exit(1)})" "$RES/$DIST"
+      fi
+    done
+    echo "[ray-sidecar] runtime Node nao encontrado (tentou: $NODE_BAKED)" >&2
+    exit 1
+  fi
+done
+
+echo "[ray-sidecar] sidecar resources nao encontrados (tentou: $RES_CANDIDATES)" >&2
 exit 1

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, cleanup, fireEvent } from '@testing-library/svelte'
+import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte'
 import Settings from './Settings.svelte'
 import { setSettingsStateFeed, resetSettingsStateFeed } from './settings-feed'
 import { onSettingsAction } from './settings-actions'
@@ -8,8 +8,9 @@ import type { SettingsState } from './types'
 import {
   SHORTCUT_COMMANDS,
   DEFAULT_SHORTCUTS,
+  DEFAULT_FEATURE_TOGGLES,
 } from '../../../../../contracts/settings'
-import type { ShortcutBinding } from '../../../../../contracts/settings'
+import type { ShortcutBinding, ShortcutMap } from '../../../../../contracts/settings'
 import { formatCombo } from './shortcut-validation'
 
 // Contrato T-406 / RF-601, RF-602, RF-604 — aba Atalhos: o conjunto padrão
@@ -23,14 +24,21 @@ import { formatCombo } from './shortcut-validation'
 //   - "Redefinir Todos para Padrões" volta ao DEFAULT_SHORTCUTS.
 // A UI espelha para feedback — NÃO re-dona a enforcement (o registro real no
 // SO é do núcleo). As mudanças saem pela fronteira declarada
-// (settings-actions): nenhum comando core de atalhos existe ainda
-// (coverageMap); a UI NUNCA inventa um invoke().
+// (settings-actions) E, desde o comando core apply_shortcuts (core/src/
+// lib.rs), o mapa corrente é aplicado no SO com efeito imediato: commit
+// válido, toggle de ativação e redefinição chamam invoke('apply_shortcuts')
+// e os erros individuais do núcleo voltam como feedback na linha alterada.
 
 const { invokeMock } = vi.hoisted(() => ({
   invokeMock: vi.fn<(command: string, args?: unknown) => Promise<unknown>>().mockResolvedValue(undefined),
 }))
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }))
+vi.mock('@tauri-apps/api/event', () => ({
+  emit: vi.fn().mockResolvedValue(undefined),
+  listen: vi.fn().mockResolvedValue(() => {}),
+}))
+vi.mock('@tauri-apps/api/app', () => ({ getVersion: vi.fn().mockResolvedValue('1.2.3') }))
 
 const SHORTCUT_LABELS: Record<string, string> = {
   askOrSend: 'Perguntar/Enviar',
@@ -76,6 +84,7 @@ function baseState(overrides: Partial<SettingsState> = {}): SettingsState {
     },
     appVersion: '0.0.0',
     shortcuts: DEFAULT_SHORTCUTS,
+    features: { ...DEFAULT_FEATURE_TOGGLES },
     ...overrides,
   }
 }
@@ -127,7 +136,9 @@ function shortcutChanges(actions: SettingsAction[]): Array<{ type: string; comma
 afterEach(() => {
   cleanup()
   resetSettingsStateFeed()
-  invokeMock.mockClear()
+  // mockReset limpa a implementação baseline — reestabelecemos o resolved
+  // undefined (invoke real SEMPRE devolve Promise).
+  invokeMock.mockReset().mockResolvedValue(undefined)
 })
 
 describe('Atalhos — conjunto padrão (RF-604)', () => {
@@ -365,7 +376,118 @@ describe('Atalhos — Redefinir Todos para Padrões (RF-601)', () => {
     expect(actions).toEqual([{ type: 'shortcutReset' }])
     expect(comboText(container, 'askOrSend')).toBe('Cmd+Enter')
     expect(comboText(container, 'captureScreen')).toBe('Cmd+E')
-    expect(invokeMock, 'a UI não deve inventar comandos core (general.md)').not.toHaveBeenCalled()
+    // Comandos core registrados (core/src/lib.rs) são permitidos; a regra
+    // proíbe inventar nomes fora do contrato (general.md).
+    const calledCommands = invokeMock.mock.calls.map((call) => call[0])
+    for (const command of calledCommands) {
+      expect(
+        [
+          'get_provider_statuses',
+          'get_permission_status',
+          'get_shortcuts',
+          'get_app_settings',
+          'apply_shortcuts',
+        ],
+        `comando não registrado: ${command}`,
+      ).toContain(command)
+    }
     unsubscribe()
+  })
+
+  it('Redefinir aplica o conjunto PADRÃO no core (apply_shortcuts)', async () => {
+    setSettingsStateFeed(() =>
+      baseState({
+        shortcuts: {
+          ...DEFAULT_SHORTCUTS,
+          askOrSend: { enabled: true, modifiers: ['Ctrl'], key: 'Q' },
+        },
+      }),
+    )
+    const { container } = render(Settings)
+    await openTab(container, 'shortcuts')
+
+    const reset = container.querySelector('[data-shortcut-reset]')
+    if (!reset) {
+      throw new Error('botão Redefinir Todos para Padrões não encontrado')
+    }
+    await fireEvent.click(reset)
+
+    const applyCall = invokeMock.mock.calls.find((call) => call[0] === 'apply_shortcuts')
+    expect(applyCall, 'reset deve aplicar no core').toBeDefined()
+    expect((applyCall?.[1] as { bindings: ShortcutMap }).bindings).toEqual(DEFAULT_SHORTCUTS)
+  })
+})
+
+describe('Atalhos — aplicação no SO via core (apply_shortcuts)', () => {
+  it('commit válido despacha shortcutChange E aplica o mapa corrente no core', async () => {
+    const { container } = render(Settings)
+    await openTab(container, 'shortcuts')
+
+    await startRecording(container, 'toggleVoiceRecording')
+    await pressKey(container, 'toggleVoiceRecording', { key: 'R', metaKey: true })
+
+    const applyCall = invokeMock.mock.calls.find((call) => call[0] === 'apply_shortcuts')
+    expect(applyCall, 'commit válido deve chamar apply_shortcuts').toBeDefined()
+    const bindings = (applyCall?.[1] as { bindings: ShortcutMap }).bindings
+    expect(bindings.toggleVoiceRecording).toEqual({
+      enabled: true,
+      modifiers: ['Cmd'],
+      key: 'R',
+    })
+    // O mapa completo vai junto (o core registra tudo de uma vez)
+    expect(Object.keys(bindings)).toEqual([...SHORTCUT_COMMANDS])
+  })
+
+  it('toggle de ativação também aplica o mapa no core (RF-601)', async () => {
+    const { container } = render(Settings)
+    await openTab(container, 'shortcuts')
+
+    const toggle = container.querySelector(
+      '[data-shortcut-toggle="captureScreen"]',
+    ) as HTMLInputElement
+    if (!toggle) {
+      throw new Error('toggle de captureScreen não encontrado')
+    }
+    await fireEvent.click(toggle)
+
+    const applyCall = invokeMock.mock.calls.find((call) => call[0] === 'apply_shortcuts')
+    expect(applyCall, 'toggle deve chamar apply_shortcuts').toBeDefined()
+    expect((applyCall?.[1] as { bindings: ShortcutMap }).bindings.captureScreen).toEqual({
+      enabled: false,
+      modifiers: ['Cmd'],
+      key: 'E',
+    })
+  })
+
+  it('erros do núcleo em apply_shortcuts viram feedback na linha alterada', async () => {
+    invokeMock.mockImplementation(async (command: string) =>
+      command === 'apply_shortcuts'
+        ? { errors: ['combo já registrado pelo sistema: Cmd+R'] }
+        : undefined,
+    )
+    const { container } = render(Settings)
+    await openTab(container, 'shortcuts')
+
+    await startRecording(container, 'toggleVoiceRecording')
+    await pressKey(container, 'toggleVoiceRecording', { key: 'R', metaKey: true })
+
+    await waitFor(() => {
+      expect(
+        container.querySelector('[data-shortcut-error="toggleVoiceRecording"]')?.textContent,
+      ).toContain('combo já registrado')
+    })
+  })
+
+  it('combo inválido (espelho local) não chega a chamar apply_shortcuts', async () => {
+    const { container } = render(Settings)
+    await openTab(container, 'shortcuts')
+
+    await startRecording(container, 'toggleVoiceRecording')
+    await pressKey(container, 'toggleVoiceRecording', { key: 'X' })
+
+    expect(
+      invokeMock.mock.calls.some((call) => call[0] === 'apply_shortcuts'),
+      'validação local falhou — nada a aplicar',
+    ).toBe(false)
   })
 })

@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, cleanup, fireEvent } from '@testing-library/svelte'
+import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte'
 import Settings from './Settings.svelte'
 import { setSettingsStateFeed, resetSettingsStateFeed } from './settings-feed'
 import { onSettingsAction } from './settings-actions'
 import type { SettingsAction } from './settings-actions'
 import type { SettingsState } from './types'
-import { DEFAULT_SHORTCUTS } from '../../../../../contracts/settings'
+import { DEFAULT_FEATURE_TOGGLES, DEFAULT_SHORTCUTS } from '../../../../../contracts/settings'
 
 // Contrato T-406 / RF-401, RF-402, RF-403, RF-406 — aba Fontes de IA:
 // BYOK com os quatro modos de conexão sob uma abstração comum:
@@ -15,15 +15,21 @@ import { DEFAULT_SHORTCUTS } from '../../../../../contracts/settings'
 //   Endpoint compatível: modelos locais/auto-hospedados, endpoint base configurável
 // Filtro Todos / Local / Nuvem (RF-402); campo dedicado de chave por provedor;
 // DeepSeek como card dedicado (RF-406); status de conexão (RF-403) lido do
-// feed — a chamada de validação em si depende de comando core inexistente
-// (coverageMap). A ação de salvar sai pelo canal settings-actions (a
-// fronteira declarada); a UI NUNCA inventa um comando invoke() (general.md).
+// feed. Salvar sai pelo canal settings-actions; o comando core
+// delete_credential existe (core/src/lib.rs): "Excluir" remove a credencial
+// do cofre+banco e emite 'ray:credentials-changed' para recarregar status.
 
-const { invokeMock } = vi.hoisted(() => ({
+const { invokeMock, emitMock } = vi.hoisted(() => ({
   invokeMock: vi.fn<(command: string, args?: unknown) => Promise<unknown>>().mockResolvedValue(undefined),
+  emitMock: vi.fn<(event: string, payload?: unknown) => Promise<void>>().mockResolvedValue(undefined),
 }))
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }))
+vi.mock('@tauri-apps/api/event', () => ({
+  emit: emitMock,
+  listen: vi.fn().mockResolvedValue(() => {}),
+}))
+vi.mock('@tauri-apps/api/app', () => ({ getVersion: vi.fn().mockResolvedValue('1.2.3') }))
 
 const PROVIDER_CARDS: Array<[string, string]> = [
   ['deepseek', 'DeepSeek'],
@@ -57,6 +63,7 @@ function baseState(overrides: Partial<SettingsState> = {}): SettingsState {
     },
     appVersion: '0.0.0',
     shortcuts: DEFAULT_SHORTCUTS,
+    features: { ...DEFAULT_FEATURE_TOGGLES },
     ...overrides,
   }
 }
@@ -80,7 +87,10 @@ function clickSave(container: HTMLElement, slot: string): void {
 afterEach(() => {
   cleanup()
   resetSettingsStateFeed()
-  invokeMock.mockClear()
+  // mockReset limpa a implementação baseline — reestabelecemos o resolved
+  // undefined (invoke real SEMPRE devolve Promise).
+  invokeMock.mockReset().mockResolvedValue(undefined)
+  emitMock.mockClear()
 })
 
 describe('Fontes de IA — quatro modos de conexão (RF-401)', () => {
@@ -283,7 +293,111 @@ describe('Fontes de IA — salvar credencial pela fronteira declarada', () => {
     clickSave(container, 'deepseek')
 
     expect(actions).toHaveLength(1)
-    expect(invokeMock, 'a UI não deve inventar comandos core (general.md)').not.toHaveBeenCalled()
+    // Comandos core registrados (core/src/lib.rs) são permitidos — inclusive
+    // os de hidratação do feed; a regra proíbe inventar nomes fora do
+    // contrato (general.md).
+    const calledCommands = invokeMock.mock.calls.map((call) => call[0])
+    for (const command of calledCommands) {
+      expect(
+        [
+          'get_provider_statuses',
+          'get_permission_status',
+          'get_shortcuts',
+          'get_app_settings',
+        ],
+        `comando não registrado: ${command}`,
+      ).toContain(command)
+    }
     unsubscribe()
+  })
+})
+
+describe('Fontes de IA — excluir credencial (delete_credential)', () => {
+  it('não oferece Excluir enquanto o slot não está configurado', () => {
+    const { container } = render(Settings)
+
+    expect(container.querySelector('[data-provider-delete="deepseek"]')).toBeNull()
+    expect(container.querySelector('[data-provider-delete="generic"]')).toBeNull()
+  })
+
+  it('aparece ao lado de Salvar quando o status não é "Não configurado"', () => {
+    setSettingsStateFeed(() =>
+      baseState({
+        providerStatus: {
+          ...baseState().providerStatus,
+          deepseek: 'saved',
+          openai: 'connected',
+        },
+      }),
+    )
+    const { container } = render(Settings)
+
+    for (const slot of ['deepseek', 'openai']) {
+      const del = container.querySelector(`[data-provider-delete="${slot}"]`)
+      expect(del, `botão Excluir de ${slot}`).not.toBeNull()
+      expect(del?.textContent?.trim()).toBe('Excluir')
+      // Ao lado de Salvar: mesma .key-row
+      expect(del?.closest('.key-row')?.querySelector(`[data-provider-save="${slot}"]`)).not.toBeNull()
+    }
+    expect(container.querySelector('[data-provider-delete="anthropic"]')).toBeNull()
+  })
+
+  it('Excluir invoca delete_credential, limpa o campo e emite ray:credentials-changed', async () => {
+    setSettingsStateFeed(() =>
+      baseState({
+        providerStatus: { ...baseState().providerStatus, deepseek: 'saved' },
+      }),
+    )
+    const { container } = render(Settings)
+
+    typeKey(container, 'deepseek', 'sk-deepseek-abc')
+    const del = container.querySelector('[data-provider-delete="deepseek"]')
+    if (!del) {
+      throw new Error('botão Excluir do deepseek não encontrado')
+    }
+    await fireEvent.click(del)
+
+    expect(invokeMock).toHaveBeenCalledWith('delete_credential', { slot: 'deepseek' })
+    await waitFor(() => {
+      expect(emitMock).toHaveBeenCalledWith('ray:credentials-changed', {
+        slot: 'deepseek',
+        valid: undefined,
+      })
+    })
+    const input = container.querySelector('[data-provider-key-input="deepseek"]') as HTMLInputElement
+    expect(input.value, 'o campo de chave é limpo após excluir').toBe('')
+  })
+
+  it('Excluir com core indisponível não emite recarga nem quebra a UI', async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'delete_credential') {
+        throw new Error('sidecar not started')
+      }
+      return undefined
+    })
+    setSettingsStateFeed(() =>
+      baseState({
+        providerStatus: { ...baseState().providerStatus, deepseek: 'saved' },
+      }),
+    )
+    const { container } = render(Settings)
+
+    const del = container.querySelector('[data-provider-delete="deepseek"]')
+    if (!del) {
+      throw new Error('botão Excluir do deepseek não encontrado')
+    }
+    await fireEvent.click(del)
+
+    expect(invokeMock).toHaveBeenCalledWith('delete_credential', { slot: 'deepseek' })
+    expect(emitMock).not.toHaveBeenCalledWith('ray:credentials-changed', {
+      slot: 'deepseek',
+      valid: undefined,
+    })
+    await waitFor(() => {
+      expect(
+        (container.querySelector('[data-provider-delete="deepseek"]') as HTMLButtonElement).disabled,
+        'botão reabilita após a falha',
+      ).toBe(false)
+    })
   })
 })

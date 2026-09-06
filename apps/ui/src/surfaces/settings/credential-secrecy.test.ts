@@ -10,7 +10,14 @@ import type { SettingsAction } from './settings-actions'
 // nunca loga, persiste ou renderiza o valor em outro lugar — o núcleo Rust é
 // o único dono de segredos reais (vault). Este teste pina esse invariante
 // com espiões em console e Storage: se o GREEN logar ou persistir o segredo,
-// falha aqui.
+// falha aqui. (localStorage pode guardar SÓ preferências não-secretas
+// allowlistadas — ray_models/ray_audio_meters — nunca conteúdo digitado.)
+
+vi.mock('@tauri-apps/api/event', () => ({
+  emit: vi.fn().mockResolvedValue(undefined),
+  listen: vi.fn().mockResolvedValue(() => {}),
+}))
+vi.mock('@tauri-apps/api/app', () => ({ getVersion: vi.fn().mockResolvedValue('1.2.3') }))
 
 const SECRET = 'sk-test-secret-123'
 

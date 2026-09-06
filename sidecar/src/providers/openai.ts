@@ -34,24 +34,42 @@ function buildContextBlock(context: TranscriptContextSegment[]): string {
     .join("\n");
 }
 
+type OpenAiContent =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 function buildMessages(
   system: string,
   context: TranscriptContextSegment[],
   userPrompt?: string,
-): Array<{ role: string; content: string }> {
-  const messages: Array<{ role: string; content: string }> = [];
+  screenshots?: string[],
+): Array<{ role: string; content: string | OpenAiContent[] }> {
+  const messages: Array<{ role: string; content: string | OpenAiContent[] }> = [];
 
   messages.push({ role: "system", content: system });
 
   const contextBlock = buildContextBlock(context);
+  let userContent = "";
   if (contextBlock.length > 0) {
-    let userContent = "Transcript context:\n" + contextBlock;
+    userContent = "Transcript context:\n" + contextBlock;
     if (userPrompt) {
       userContent += "\n\n" + userPrompt;
     }
-    messages.push({ role: "user", content: userContent });
   } else if (userPrompt) {
-    messages.push({ role: "user", content: userPrompt });
+    userContent = userPrompt;
+  }
+
+  // Visão (RF-332): capturas de tela entram como image_url no turno do user.
+  const images: OpenAiContent[] = (screenshots ?? []).map((url) => ({
+    type: "image_url",
+    image_url: { url },
+  }));
+  if (images.length > 0) {
+    const parts: OpenAiContent[] = [{ type: "text", text: userContent }];
+    parts.push(...images);
+    messages.push({ role: "user", content: parts });
+  } else if (userContent !== "") {
+    messages.push({ role: "user", content: userContent });
   }
 
   return messages;
@@ -105,7 +123,12 @@ export class OpenAiProvider implements AiProvider {
     const body = {
       model,
       stream: true,
-      messages: buildMessages(params.system, params.context, params.userPrompt),
+      messages: buildMessages(
+        params.system,
+        params.context,
+        params.userPrompt,
+        params.screenshots,
+      ),
     };
 
     const response = await fetch(url, {

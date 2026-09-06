@@ -38,21 +38,62 @@ function buildContextBlock(context: TranscriptContextSegment[]): string {
     .join("\n");
 }
 
+type AnthropicContent =
+  | { type: "text"; text: string }
+  | {
+      type: "image";
+      source: { type: "base64"; media_type: string; data: string };
+    };
+
+function parseDataUrl(
+  url: string,
+): { mediaType: string; data: string } | null {
+  const match = /^data:(image\/[a-zA-Z+]+);base64,(.+)$/.exec(url);
+  if (!match) return null;
+  return { mediaType: match[1], data: match[2] };
+}
+
 function buildMessages(
   context: TranscriptContextSegment[],
   userPrompt?: string,
-): Array<{ role: string; content: string }> {
-  const messages: Array<{ role: string; content: string }> = [];
+  screenshots?: string[],
+): Array<{ role: string; content: string | AnthropicContent[] }> {
+  const messages: Array<{ role: string; content: string | AnthropicContent[] }> = [];
 
   const contextBlock = buildContextBlock(context);
+  let userContent = "";
   if (contextBlock.length > 0) {
-    let userContent = "Transcript context:\n" + contextBlock;
+    userContent = "Transcript context:\n" + contextBlock;
     if (userPrompt) {
       userContent += "\n\n" + userPrompt;
     }
-    messages.push({ role: "user", content: userContent });
   } else if (userPrompt) {
-    messages.push({ role: "user", content: userPrompt });
+    userContent = userPrompt;
+  }
+
+  const images: AnthropicContent[] = [];
+  for (const shot of screenshots ?? []) {
+    const parsed = parseDataUrl(shot);
+    if (parsed) {
+      images.push({
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: parsed.mediaType,
+          data: parsed.data,
+        },
+      });
+    }
+  }
+
+  if (images.length > 0) {
+    const parts: AnthropicContent[] = [...images];
+    if (userContent !== "") {
+      parts.push({ type: "text", text: userContent });
+    }
+    messages.push({ role: "user", content: parts });
+  } else if (userContent !== "") {
+    messages.push({ role: "user", content: userContent });
   }
 
   if (messages.length === 0) {
@@ -112,7 +153,11 @@ export class AnthropicProvider implements AiProvider {
       max_tokens: DEFAULT_MAX_TOKENS,
       stream: true,
       system: params.system,
-      messages: buildMessages(params.context, params.userPrompt),
+      messages: buildMessages(
+        params.context,
+        params.userPrompt,
+        params.screenshots,
+      ),
     };
 
     const response = await fetch(url, {

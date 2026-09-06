@@ -1,6 +1,8 @@
 /* Estilos globais da UI. O material de vidro em si mora em
-   src/lib/glass/ (tokens.ts é a fonte de verdade) — aqui ficam só a base
-   tipográfica e o fundo sobre o qual o vidro refrata. */
+   src/lib/glass/ (tokens.ts é a fonte de verdade) — aqui ficam a base
+   tipográfica, o fundo sobre o qual o vidro refrata e o design system de
+   controles (botões, switches, campos, scrollbars) compartilhado por todas
+   as superfícies. */
 
 :root {
   /* 1rem = 10px: a convenção de unidades do repo (.claude/rules/general.md). */
@@ -9,7 +11,40 @@
      com branco do sistema, que aparece por trás do html transparente no
      WKWebView mesmo com transparent:true no Tauri. Os tokens de vidro usam
      rgba() explícitos e não dependem de system colors. */
-  font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', 'Segoe UI', Roboto, sans-serif;
+
+  /* Acento: índigo suave — macOS system purple sem saturar. */
+  --iris: #5a57e8;
+  --iris-dim: rgba(90, 87, 232, 0.22);
+  --iris-border: rgba(90, 87, 232, 0.32);
+
+  /* Paleta do design system (UI Mocks): camadas de fundo, bordas de vidro
+     e níveis de texto sobre o tema escuro. */
+  --void: #0b0d14;
+  --surface: #161824;
+  --elevated: #1d1f2e;
+  --rim: rgba(255, 255, 255, 0.09);
+  --rim-strong: rgba(255, 255, 255, 0.15);
+  --text-p: #f0f0f8;
+  --text-s: rgba(240, 240, 248, 0.52);
+  --text-t: rgba(240, 240, 248, 0.3);
+
+  /* Semânticas. */
+  --orange: #ff9f0a;
+  --green: #30d158;
+  --yellow: #ffd60a;
+
+  /* Vermelho semântico para erros no tema escuro. */
+  --error: #ff453a;
+
+  /* Elevação: sombras suaves para superfícies flutuantes. */
+  --shadow-float: 0 1.6rem 4rem rgba(0, 0, 0, 0.45);
+  --shadow-card: 0 0.4rem 1.6rem rgba(0, 0, 0, 0.25);
+
+  /* Raios canônicos (premium = consistência de curvatura). */
+  --radius-s: 0.6rem;
+  --radius-m: 0.9rem;
+  --radius-l: 1.4rem;
 }
 
 * {
@@ -26,4 +61,202 @@ body {
   margin: 0;
   font-size: 1.4rem;
   line-height: 1.5;
+  /* Garante texto legível sobre o fundo escuro da janela principal. */
+  color: var(--text-p);
+  /* Vinheta sutil: profundidade sem chamar atenção — o fundo "recede" e o
+     conteúdo em vidro flutua. */
+  background:
+    radial-gradient(120% 90% at 50% 0%, rgba(90, 87, 232, 0.06), transparent 60%),
+    var(--void);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Foco visível consistente (acessibilidade premium) ─────────────────── */
+
+:focus-visible {
+  outline: 2px solid var(--iris);
+  outline-offset: 2px;
+}
+
+/* ── Formulários: fundo branco do browser substituído por dark glass ── */
+
+input,
+select,
+textarea {
+  font: inherit;
+  background: rgba(255, 255, 255, 0.05);
+  border: 0.1rem solid var(--rim);
+  border-radius: var(--radius-s);
+  color: var(--text-p);
+  padding: 0.6rem 1rem;
+  transition:
+    border-color 0.12s,
+    background 0.12s;
+}
+
+input:hover,
+select:hover,
+textarea:hover {
+  border-color: var(--rim-strong);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: rgba(240, 240, 248, 0.35);
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--iris);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+select {
+  appearance: none;
+  padding-right: 2.8rem;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23a8a8b8' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 1rem center;
+}
+
+select option {
+  background: var(--elevated);
+  color: var(--text-p);
+}
+
+/* ── Checkboxes viram switches (macOS-like) ────────────────────────────── */
+
+input[type='checkbox'] {
+  appearance: none;
+  width: 3.6rem;
+  height: 2.1rem;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  flex-shrink: 0;
+}
+
+input[type='checkbox']::after {
+  content: '';
+  position: absolute;
+  top: 0.25rem;
+  left: 0.25rem;
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  transition: transform 0.15s ease;
+}
+
+input[type='checkbox']:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+input[type='checkbox']:checked {
+  background: var(--iris);
+}
+
+input[type='checkbox']:checked::after {
+  transform: translateX(1.5rem);
+}
+
+input[type='checkbox']:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ── Botões compartilhados ─────────────────────────────────────────────── */
+
+.btn {
+  font: inherit;
+  font-size: 1.2rem;
+  font-weight: 600;
+  padding: 0.6rem 1.4rem;
+  color: var(--text-s);
+  background: rgba(255, 255, 255, 0.06);
+  border: 0.1rem solid var(--rim);
+  border-radius: var(--radius-s);
+  cursor: pointer;
+  transition:
+    background 0.12s,
+    color 0.12s,
+    border-color 0.12s;
+}
+
+.btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-p);
+}
+
+.btn--primary {
+  color: #fff;
+  background: var(--iris);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.btn--primary:hover {
+  background: #6a67f0;
+  color: #fff;
+}
+
+.btn--danger {
+  color: var(--error);
+  background: rgba(255, 69, 58, 0.1);
+  border-color: rgba(255, 69, 58, 0.3);
+}
+
+.btn--danger:hover {
+  background: rgba(255, 69, 58, 0.18);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ── kbd: chips de atalho ──────────────────────────────────────────────── */
+
+kbd {
+  font-family: ui-monospace, 'SF Mono', monospace;
+  font-size: 1rem;
+  padding: 0.25rem 0.6rem;
+  color: var(--text-s);
+  background: rgba(255, 255, 255, 0.05);
+  border: 0.1rem solid var(--rim);
+  border-bottom-color: var(--rim-strong);
+  border-radius: 0.5rem;
+}
+
+/* ── Scrollbars discretas ──────────────────────────────────────────────── */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 4px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
 }

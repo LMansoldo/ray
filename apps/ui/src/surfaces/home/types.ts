@@ -12,6 +12,18 @@ import type {
 export interface SessionSummary {
   id: string
   title: string
+  /** ISO-8601 do início da sessão (exibição da lista). */
+  startedAt?: string
+  /** Número de segmentos de transcrição persistidos. */
+  segmentCount?: number
+}
+
+/** Detalhe de uma sessão aberta da lista (transcrição persistida). */
+export interface SessionDetailData {
+  id: string
+  assistantName: string | null
+  startedAt: string
+  transcript: Array<{ speaker: string; text: string; startMs: number }>
 }
 
 /** Item de memória recente do card em tempo real (RF-339). */
@@ -36,9 +48,6 @@ export interface AssistantSummary {
  */
 export interface HomeProps {
   sessions: SessionSummary[]
-  planName: string
-  freeSessionsUsed: number
-  freeSessionsTotal: number
   assistant: AssistantSummary
   memoryItems: MemoryItem[]
   sessionId: string
@@ -46,6 +55,10 @@ export interface HomeProps {
   context: TranscriptContextSegment[]
   credential: InjectedCredential
   screenshots?: string[]
+  /** RF-206: exibir medidores de áudio durante a reunião. */
+  metersVisible?: boolean
+  /** RF-703: aviso "Continuar Gravando?" a cada 30 min de reunião. */
+  sessionTimerEnabled?: boolean
 }
 
 /** Props do grupo de ações de conversa (RF-333). */

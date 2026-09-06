@@ -28,7 +28,7 @@ apps/ui/src/
     ├── home/                 # T-402 — sessions, assistant card, conversation actions
     ├── overlay/               # T-403 — real-time insight card, streaming
     ├── notch/                  # T-404 — compact insight surface, secondary Tauri window
-    ├── onboarding/              # T-405 — 6-step flow
+    ├── onboarding/              # T-405 — 5-step flow (no trial; full usage is the default)
     ├── settings/                 # T-406 — AI sources, models, audio, shortcuts, help
     └── assistants/                 # T-407 — library + creator
 ```

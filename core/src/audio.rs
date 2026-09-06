@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+
 /// Identifica um dispositivo de audio do SO.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioDevice {
@@ -56,25 +57,53 @@ pub(crate) fn install_mock<B: AudioBackend + 'static>(backend: B, f: impl FnOnce
 // GREEN: start_capture produz frames aqui. RED: vazio (stub e no-op).
 // ---------------------------------------------------------------------------
 
-static PCM_QUEUE: Mutex<VecDeque<Vec<i16>>> = Mutex::new(VecDeque::new());
+/// Canal de áudio: VOYOU (microfone) vs OUTROS (áudio do sistema/reunião).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AudioChannel {
+    Self_,
+    Others,
+}
+
+/// Filas por canal — o STT atribui o falante pelo canal de origem.
+static PCM_QUEUE_SELF: Mutex<VecDeque<Vec<i16>>> = Mutex::new(VecDeque::new());
+static PCM_QUEUE_OTHERS: Mutex<VecDeque<Vec<i16>>> = Mutex::new(VecDeque::new());
 
 /// Capacidade padrao da fila de PCM (backpressure: descarta mais antigo).
 pub(crate) const PCM_QUEUE_CAPACITY: usize = 1000;
 
 /// Drena todos os frames PCM acumulados na fila (para consumo pelo STT).
 pub(crate) fn drain_pcm_queue() -> Vec<Vec<i16>> {
-    let mut queue = PCM_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    drain_pcm_queue_channel(AudioChannel::Self_)
+}
+
+/// Drena a fila do canal indicado (SELF = mic, OTHERS = sistema).
+pub(crate) fn drain_pcm_queue_channel(channel: AudioChannel) -> Vec<Vec<i16>> {
+    let mut queue = match channel {
+        AudioChannel::Self_ => PCM_QUEUE_SELF.lock().unwrap_or_else(|e| e.into_inner()),
+        AudioChannel::Others => PCM_QUEUE_OTHERS.lock().unwrap_or_else(|e| e.into_inner()),
+    };
     queue.drain(..).collect()
 }
 
 /// Retorna o numero de frames na fila.
 pub(crate) fn pcm_queue_len() -> usize {
-    PCM_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).len()
+    let self_len = PCM_QUEUE_SELF.lock().unwrap_or_else(|e| e.into_inner()).len();
+    let others_len = PCM_QUEUE_OTHERS.lock().unwrap_or_else(|e| e.into_inner()).len();
+    self_len + others_len
 }
 
 /// Empurra um frame para a fila global de PCM (com backpressure).
 pub(crate) fn push_frame_to_queue(frame: Vec<i16>) {
-    let mut queue = PCM_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    push_frame_to_queue_channel(AudioChannel::Self_, frame);
+}
+
+/// Enfileira um frame no canal indicado (com backpressure: descarta o mais
+/// antigo quando cheia — áudio velho não serve para transcrição ao vivo).
+pub(crate) fn push_frame_to_queue_channel(channel: AudioChannel, frame: Vec<i16>) {
+    let mut queue = match channel {
+        AudioChannel::Self_ => PCM_QUEUE_SELF.lock().unwrap_or_else(|e| e.into_inner()),
+        AudioChannel::Others => PCM_QUEUE_OTHERS.lock().unwrap_or_else(|e| e.into_inner()),
+    };
     if queue.len() >= PCM_QUEUE_CAPACITY {
         queue.pop_front();
     }
@@ -84,7 +113,7 @@ pub(crate) fn push_frame_to_queue(frame: Vec<i16>) {
 /// Limpa a fila (util entre testes).
 #[cfg(test)]
 pub(crate) fn clear_pcm_queue() {
-    PCM_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    PCM_QUEUE_SELF.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +134,27 @@ static METER_LEVELS: Mutex<Vec<MeterLevel>> = Mutex::new(Vec::new());
 /// Retorna os niveis de medidor atuais (para UI).
 pub(crate) fn get_meter_levels() -> Vec<MeterLevel> {
     METER_LEVELS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Atualiza (upsert) o nível RMS de um canal — chamado pelos callbacks de
+/// captura reais para os medidores da UI (RF-206/CA-5).
+fn update_meter_level(channel_id: &str, samples: &[f32]) {
+    if samples.is_empty() {
+        return;
+    }
+    let sum: f64 = samples
+        .iter()
+        .map(|&s| f64::from(s) * f64::from(s))
+        .sum::<f64>();
+    let rms = (sum / samples.len() as f64).sqrt();
+    let mut levels = METER_LEVELS.lock().unwrap_or_else(|e| e.into_inner());
+    match levels.iter_mut().find(|l| l.channel_id == channel_id) {
+        Some(entry) => entry.rms = rms,
+        None => levels.push(MeterLevel {
+            channel_id: channel_id.to_string(),
+            rms,
+        }),
+    }
 }
 
 /// Limpa os niveis de medidor.
@@ -177,19 +227,375 @@ pub fn start_capture(device_id: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Platform stubs (real FFI wired in T-500 / platform audio driver tasks)
+// Platform layer — captura real via cpal (CoreAudio no macOS, T-500 parcial:
+// microfone nativo; áudio de sistema continua dependente do driver virtual)
 // ---------------------------------------------------------------------------
 
+/// Rate alvo do pipeline de STT (ADR-007: mono 16kHz i16).
+const TARGET_RATE: u32 = 16_000;
+
+/// Streams ativos. cpal encerra o stream ao drop — mantidos aqui até stop.
+static ACTIVE_STREAMS: Mutex<Vec<cpal::Stream>> = Mutex::new(Vec::new());
+
+/// Flag de resample: mantém estado entre callbacks do mesmo stream.
+struct LinearResampler {
+    /// Passo entre amostras de saída em unidades de entrada (rate/16000).
+    step: f64,
+    pos: f64,
+    prev: f32,
+}
+
+impl LinearResampler {
+    fn new(input_rate: u32) -> Self {
+        Self {
+            step: f64::from(input_rate) / f64::from(TARGET_RATE),
+            pos: 0.0,
+            prev: 0.0,
+        }
+    }
+
+    /// Converte um chunk de entrada mono f32 em saída 16k mono i16.
+    fn feed(&mut self, input: &[f32], out: &mut Vec<i16>) {
+        for &sample in input {
+            let mut p = self.pos + self.step;
+            while p >= 1.0 {
+                p -= 1.0;
+                let t = p as f32;
+                let v = self.prev + (sample - self.prev) * t;
+                let clamped = v.clamp(-1.0, 1.0);
+                out.push((clamped * 32_767.0) as i16);
+            }
+            self.prev = sample;
+            self.pos = p;
+        }
+    }
+}
+
+fn to_i16_mono(input: &[f32], channels: usize) -> Vec<f32> {
+    if channels <= 1 {
+        return input.to_vec();
+    }
+    input
+        .chunks(channels)
+        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+        .collect()
+}
+
 fn platform_list_input_devices() -> Vec<AudioDevice> {
-    Vec::new()
+    use cpal::traits::{DeviceTrait, HostTrait};
+
+    let host = cpal::default_host();
+    let mut devices = Vec::new();
+    if let Ok(iter) = host.input_devices() {
+        for (idx, dev) in iter.enumerate() {
+            // cpal 0.18: Device é Display — o nome vem via Display/description.
+            let name = dev.to_string();
+            devices.push(AudioDevice { id: format!("input:{idx}:{name}"), name });
+        }
+    }
+    devices
 }
 
+/// Fontes de "áudio recebido" (OUTROS): dispositivos loopback como o
+/// BlackHole. Sem driver virtual instalado → lista vazia (RF-204: o caller
+/// sinaliza a limitação; nunca silencioso).
 fn platform_list_incoming_sources() -> Vec<AudioDevice> {
-    Vec::new()
+    platform_list_input_devices()
+        .into_iter()
+        .filter(|d| {
+            let n = d.name.to_lowercase();
+            n.contains("blackhole") || n.contains("ray audio")
+        })
+        .collect()
 }
 
-fn platform_start_capture(_device_id: &str) {
-    // Real audio stream opened here once platform driver (T-500) is available.
+/// Abre o stream de captura do microfone e passa a enfileirar PCM 16k mono.
+/// `device_id` aceita "default" ou o id retornado por list_input_devices.
+fn platform_start_capture(device_id: &str) {
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+    let host = cpal::default_host();
+    let device = match device_id {
+        "default" | "" => host.default_input_device(),
+        id => {
+            // id tem o formato "input:<idx>:<name>" — casa por sufixo de nome.
+            let needle = id.splitn(3, ':').nth(2).unwrap_or(id).to_lowercase();
+            host.input_devices()
+                .ok()
+                .and_then(|mut iter| {
+                    iter.find(|d| d.to_string().to_lowercase() == needle)
+                })
+        }
+    };
+    let Some(device) = device else {
+        eprintln!("[ray] captura: dispositivo de entrada não encontrado: {device_id}");
+        return;
+    };
+
+    let Ok(config) = device.default_input_config() else {
+        eprintln!("[ray] captura: sem config padrão para o dispositivo");
+        return;
+    };
+    let sample_rate = u32::from(config.sample_rate());
+    let channels = config.channels() as usize;
+
+    let resampler = std::sync::Arc::new(std::sync::Mutex::new(LinearResampler::new(sample_rate)));
+    let err_fn = |e| eprintln!("[ray] captura: erro no stream: {e}");
+
+    let stream = match config.sample_format() {
+        cpal::SampleFormat::F32 => {
+            let res = resampler.clone();
+            device
+                .build_input_stream(
+                    config.clone().into(),
+                    move |data: &[f32], _| {
+                        let mono = to_i16_mono(data, channels);
+                        update_meter_level("self", &mono);
+                        let mut out = Vec::with_capacity(mono.len() / 3 + 16);
+                        if let Ok(mut r) = res.lock() {
+                            r.feed(&mono, &mut out);
+                        }
+                        if !out.is_empty() {
+                            push_frame_to_queue(out);
+                        }
+                    },
+                    err_fn,
+                    None,
+                )
+        }
+        cpal::SampleFormat::I16 => {
+            let res = resampler.clone();
+            device
+                .build_input_stream(
+                    config.clone().into(),
+                    move |data: &[i16], _: &_| {
+                        let f: Vec<f32> =
+                            data.iter().map(|&s| s as f32 / 32_768.0).collect();
+                        update_meter_level("self", &f);
+                        let mono = to_i16_mono(&f, channels);
+                        let mut out = Vec::with_capacity(mono.len() / 3 + 16);
+                        if let Ok(mut r) = res.lock() {
+                            r.feed(&mono, &mut out);
+                        }
+                        if !out.is_empty() {
+                            push_frame_to_queue(out);
+                        }
+                    },
+                    err_fn,
+                    None,
+                )
+        }
+        other => {
+            eprintln!("[ray] captura: formato não suportado: {other:?}");
+            return;
+        }
+    };
+
+    match stream {
+        Ok(s) => {
+            if let Err(e) = s.play() {
+                eprintln!("[ray] captura: falha ao iniciar stream: {e}");
+                return;
+            }
+            let mut guard = ACTIVE_STREAMS.lock().unwrap_or_else(|e| e.into_inner());
+            guard.push(s);
+        }
+        Err(e) => eprintln!("[ray] captura: falha ao construir stream: {e}"),
+    }
+}
+
+/// Encerra todos os streams de captura ativos.
+fn platform_stop_capture() {
+    let mut guard = ACTIVE_STREAMS.lock().unwrap_or_else(|e| e.into_inner());
+    guard.clear(); // cpal Stream: drop = stop
+}
+
+/// Inicia a captura do ÁUDIO DO SISTEMA (a reunião: Zoom/Meet/output default)
+/// via ScreenCaptureKit — sem driver virtual (macOS 13+). Enfileira no canal
+/// OTHERS. Requer a permissão de Screen Recording (já solicitada na app).
+#[cfg(target_os = "macos")]
+pub fn start_system_capture() -> bool {
+    platform_start_system_capture()
+}
+
+/// Indica se há dispositivo loopback para o canal OUTROS (RF-204).
+#[cfg(target_os = "macos")]
+pub fn system_capture_available() -> bool {
+    system_audio::loopback_available()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn start_system_capture() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn system_capture_available() -> bool {
+    false
+}
+
+/// Encerra todos os streams de captura ativos (mic + sistema).
+pub fn stop_capture() {
+    platform_stop_capture();
+    #[cfg(target_os = "macos")]
+    platform_stop_system_capture();
+}
+
+// ---------------------------------------------------------------------------
+// Toggle do canal VOCÊ (RF-604 ⌘⇧D): liga/desliga SÓ o microfone, preservando
+// a captura de sistema (OUTROS) durante a reunião.
+// ---------------------------------------------------------------------------
+
+static MIC_CAPTURE_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Liga/desliga a captura do microfone. Retorna o novo estado.
+pub fn set_mic_capture(enabled: bool) -> bool {
+    MIC_CAPTURE_ENABLED.store(enabled, Ordering::SeqCst);
+    if enabled {
+        start_capture("default");
+    } else {
+        // Só os streams do mic (ACTIVE_STREAMS); o loopback do sistema é
+        // SYSTEM_STREAM, intocado aqui.
+        let mut guard = ACTIVE_STREAMS.lock().unwrap_or_else(|e| e.into_inner());
+        guard.clear();
+    }
+    enabled
+}
+
+/// Estado atual do toggle de microfone.
+pub fn mic_capture_enabled() -> bool {
+    MIC_CAPTURE_ENABLED.load(Ordering::SeqCst)
+}
+
+
+// ---------------------------------------------------------------------------
+// Captura de áudio do sistema via ScreenCaptureKit (canal OTHERS)
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+mod system_audio {
+    use super::{push_frame_to_queue_channel, to_i16_mono, update_meter_level, AudioChannel, LinearResampler};
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use std::sync::Mutex;
+
+    static SYSTEM_STREAM: Mutex<Option<cpal::Stream>> = Mutex::new(None);
+
+    /// True se existe um dispositivo loopback instalado (Ray Audio Driver
+    /// preferido — ADR-004/RF-203; BlackHole como fallback).
+    pub(crate) fn loopback_available() -> bool {
+        find_loopback_device().is_some()
+    }
+
+    fn find_loopback_device() -> Option<cpal::Device> {
+        let host = cpal::default_host();
+        // RF-203: o driver do produto tem prioridade sobre third-party.
+        let mut fallback = None;
+        host.input_devices().ok()?.find(|d| {
+            let n = d.to_string().to_lowercase();
+            if n.contains("ray audio") {
+                true
+            } else if n.contains("blackhole") {
+                if fallback.is_none() {
+                    fallback = Some(d.clone());
+                }
+                false
+            } else {
+                false
+            }
+        })
+        .or(fallback)
+    }
+
+    pub(crate) fn start() -> bool {
+        let mut guard = SYSTEM_STREAM.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_some() {
+            return true; // já capturando
+        }
+        let Some(device) = find_loopback_device() else {
+            eprintln!(
+                "[ray] áudio de sistema (OUTROS): nenhum dispositivo loopback. \
+                Instale o Ray Audio Driver (driver/installer/install.sh) e \
+                inclua-o em um Multi-Output Device com os alto-falantes. \
+                Alternativa: BlackHole (https://existential.audio/blackhole)."
+            );
+            return false;
+        };
+        let Ok(config) = device.default_input_config() else {
+            return false;
+        };
+        let sample_rate = u32::from(config.sample_rate());
+        let channels = config.channels() as usize;
+        let resampler = std::sync::Arc::new(Mutex::new(LinearResampler::new(sample_rate)));
+        let res = resampler.clone();
+        let stream = match config.sample_format() {
+            cpal::SampleFormat::F32 => device.build_input_stream(
+                config.clone().into(),
+                move |data: &[f32], _: &_| {
+                    let mono = to_i16_mono(data, channels);
+                    update_meter_level("others", &mono);
+                    let mut out = Vec::with_capacity(mono.len() / 3 + 16);
+                    if let Ok(mut r) = res.lock() {
+                        r.feed(&mono, &mut out);
+                    }
+                    if !out.is_empty() {
+                        push_frame_to_queue_channel(AudioChannel::Others, out);
+                    }
+                },
+                |e| eprintln!("[ray] loopback: {e}"),
+                None,
+            ),
+            cpal::SampleFormat::I16 => device.build_input_stream(
+                config.clone().into(),
+                move |data: &[i16], _: &_| {
+                    let f: Vec<f32> =
+                        data.iter().map(|&s| s as f32 / 32_768.0).collect();
+                    update_meter_level("others", &f);
+                    let mono = to_i16_mono(&f, channels);
+                    let mut out = Vec::with_capacity(mono.len() / 3 + 16);
+                    if let Ok(mut r) = res.lock() {
+                        r.feed(&mono, &mut out);
+                    }
+                    if !out.is_empty() {
+                        push_frame_to_queue_channel(AudioChannel::Others, out);
+                    }
+                },
+                |e| eprintln!("[ray] loopback: {e}"),
+                None,
+            ),
+            _ => return false,
+        };
+        match stream {
+            Ok(s) => {
+                if s.play().is_err() {
+                    return false;
+                }
+                *guard = Some(s);
+                eprintln!("[ray] captura de sistema (OUTROS) ativa");
+                true
+            }
+            Err(e) => {
+                eprintln!("[ray] loopback stream falhou: {e}");
+                false
+            }
+        }
+    }
+
+    pub(crate) fn stop() {
+        let mut guard = SYSTEM_STREAM.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(stream) = guard.take() {
+            drop(stream); // cpal Stream: drop = stop
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn platform_start_system_capture() -> bool {
+    system_audio::start()
+}
+
+#[cfg(target_os = "macos")]
+fn platform_stop_system_capture() {
+    system_audio::stop();
 }
 
 #[cfg(test)]

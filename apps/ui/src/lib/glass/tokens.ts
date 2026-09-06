@@ -9,24 +9,24 @@ export type GlassTokenLayer = 'color' | 'blur' | 'refraction' | 'shadow'
 export const glassTokens = {
   color: {
     /** Preenchimento translúcido padrão da superfície de vidro. */
-    surface: 'rgba(255, 255, 255, 0.56)',
+    surface: 'rgba(22, 24, 36, 0.9)',
     /** Preenchimento opaco do fallback sem vidro (SRS 8.3). */
-    surfaceSolid: 'rgb(248, 246, 250)',
-    border: 'rgba(255, 255, 255, 0.64)',
-    content: 'rgb(24, 22, 31)',
+    surfaceSolid: 'rgb(22, 24, 36)',
+    border: 'rgba(255, 255, 255, 0.09)',
+    content: 'rgb(240, 240, 248)',
   },
   blur: {
     /** Raio do desfoque de fundo aplicado atrás da superfície. */
-    surface: '1.6rem',
+    surface: '2rem',
   },
   refraction: {
-    /** Brilho diagonal que simula a refração da luz no vidro. */
+    /** Brilho sutil no topo que separa o painel do fundo escuro. */
     sheen:
-      'linear-gradient(135deg, rgba(255, 255, 255, 0.85) 0%, rgba(255, 255, 255, 0.08) 100%)',
+      'linear-gradient(180deg, rgba(255, 255, 255, 0.06) 0%, transparent 50%)',
   },
   shadow: {
-    /** Sombreamento que descola o painel do fundo. */
-    background: '0 0.8rem 3.2rem rgba(8, 6, 13, 0.28)',
+    /** Sombreamento que descola o painel do fundo escuro. */
+    background: '0 2rem 6rem rgba(0, 0, 0, 0.55), 0 0.2rem 0.8rem rgba(0, 0, 0, 0.30)',
   },
   radius: {
     surface: '1.2rem',

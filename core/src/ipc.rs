@@ -77,7 +77,7 @@ pub enum SuggestionTrigger {
     AnalyzeSelection,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "ipc.ts")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Speaker {
@@ -169,6 +169,10 @@ pub struct HealthResponse {
 #[ts(export, export_to = "ipc.ts")]
 pub struct ValidateCredentialRequest {
     pub credential: InjectedCredential,
+    /// Slot de provedor na UI (opcional). Quando presente, o sidecar atualiza
+    /// `lastValidatedAt` no banco após validação bem-sucedida (ADR-003).
+    #[ts(optional)]
+    pub slot: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -338,6 +342,65 @@ pub struct EndSessionResponse {
     pub summary_id: Option<String>,
 }
 
+// ── Persistência de credenciais (T-302/T-406) ────────────────────────────
+
+/// Payload de POST /credentials (core → sidecar).
+/// O segredo NUNCA aparece aqui — apenas o secretRef opaco (ADR-003).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "ipc.ts")]
+#[serde(rename_all = "camelCase")]
+pub struct SaveCredentialRequest {
+    pub slot: String,
+    pub kind: ProviderKind,
+    pub connection_mode: ProviderConnectionMode,
+    pub label: String,
+    /// Ponteiro opaco do cofre — não é o segredo (ADR-003).
+    pub secret_ref: String,
+    #[ts(optional)]
+    pub base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "ipc.ts")]
+#[serde(rename_all = "camelCase")]
+pub struct SaveCredentialResponse {
+    pub id: String,
+    pub secret_ref: String,
+}
+
+/// Payload de DELETE /credentials.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "ipc.ts")]
+pub struct DeleteCredentialRequest {
+    pub slot: String,
+}
+
+/// Resumo de uma credencial sem o segredo. `secret_ref` é ponteiro opaco —
+/// sua presença não viola ADR-003.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "ipc.ts")]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialSummary {
+    pub id: String,
+    pub slot: String,
+    pub kind: ProviderKind,
+    pub connection_mode: ProviderConnectionMode,
+    pub secret_ref: String,
+    #[ts(optional)]
+    pub base_url: Option<String>,
+    /// ISO-8601. None = nunca validada.
+    #[ts(optional)]
+    pub last_validated_at: Option<String>,
+}
+
+/// Resposta de GET /credentials.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "ipc.ts")]
+#[serde(rename_all = "camelCase")]
+pub struct GetCredentialsResponse {
+    pub credentials: Vec<CredentialSummary>,
+}
+
 /// POST /translate — tradução ao vivo, segmento a segmento (RF-303).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "ipc.ts")]
@@ -354,4 +417,24 @@ pub struct TranslateRequest {
 #[serde(rename_all = "camelCase")]
 pub struct TranslateResponse {
     pub translated_text: String,
+}
+
+/// Resumo de um assistente para a UI (GET /assistants).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "ipc.ts")]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantSummary {
+    pub id: String,
+    pub name: String,
+    pub category: String,
+    pub source: String,
+    pub icon: Option<String>,
+}
+
+/// Resposta de GET /assistants.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "ipc.ts")]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantList {
+    pub assistants: Vec<AssistantSummary>,
 }

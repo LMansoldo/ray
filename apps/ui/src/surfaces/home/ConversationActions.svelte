@@ -6,7 +6,6 @@
   // o núcleo resolve o segredo no cofre nativo, e o ponteiro segue como veio.
   import { invoke } from '@tauri-apps/api/core'
   import type { SuggestRequest, SuggestionTrigger } from '../../../../../contracts/ipc'
-  import { glassTokens } from '../../lib/glass/tokens'
   import type { ConversationActionsProps } from './types'
 
   let {
@@ -25,7 +24,20 @@
   }
 
   async function captureScreen(): Promise<void> {
-    await dispatchSuggest('SCREEN_CAPTURE', { screenshots })
+    // Captura REAL do display principal no clique (RF-332): o core devolve
+    // o PNG em data URL base64, que passa a ser o contexto visual. Se o core
+    // falhar (permissão negada, sidecar fora), cai para o prop `screenshots`
+    // (ex.: captura prévia via tray).
+    let shots = screenshots
+    try {
+      const image = await invoke<unknown>('capture_screen')
+      if (typeof image === 'string' && image.startsWith('data:image/')) {
+        shots = [image]
+      }
+    } catch (err) {
+      console.error('[capture_screen]', err)
+    }
+    await dispatchSuggest('SCREEN_CAPTURE', { screenshots: shots })
   }
 
   function toggleAsk(): void {
@@ -61,41 +73,43 @@
   }
 </script>
 
-<div
-  class="conversation-actions"
-  style:--surface-fill={glassTokens.color.surface}
-  style:--surface-border={glassTokens.color.border}
-  style:--surface-content={glassTokens.color.content}
->
+<div class="conversation-actions">
   <div class="conversation-actions__item">
-    <button
-      type="button"
-      class="conversation-actions__button"
-      onclick={analyzeConversation}
-    >
-      Analisar Conversa
+    <button type="button" class="ca" aria-label="Analisar Conversa" onclick={analyzeConversation}>
+      <span class="ca__icon" aria-hidden="true">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+          <path d="M2 4h12M2 8h8M2 12h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+        </svg>
+      </span>
+      <span class="ca__label">Analisar Conversa</span>
+      <span class="ca__desc">Resume a transcrição com insights</span>
     </button>
-    <kbd>Cmd+Shift+A</kbd>
+    <kbd>⌘↩</kbd>
   </div>
   <div class="conversation-actions__item">
-    <button
-      type="button"
-      class="conversation-actions__button"
-      onclick={captureScreen}
-    >
-      Capturar Tela
+    <button type="button" class="ca" aria-label="Capturar Tela" onclick={captureScreen}>
+      <span class="ca__icon" aria-hidden="true">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+          <rect x="1" y="3" width="14" height="10" rx="2" stroke="currentColor" stroke-width="1.5" />
+          <circle cx="8" cy="8" r="2" fill="currentColor" />
+        </svg>
+      </span>
+      <span class="ca__label">Capturar Tela</span>
+      <span class="ca__desc">Adiciona contexto visual</span>
     </button>
-    <kbd>Cmd+Shift+S</kbd>
+    <kbd>⌘E</kbd>
   </div>
   <div class="conversation-actions__item">
-    <button
-      type="button"
-      class="conversation-actions__button"
-      onclick={toggleAsk}
-    >
-      Perguntar Algo
+    <button type="button" class="ca" aria-label="Perguntar Algo" onclick={toggleAsk}>
+      <span class="ca__icon" aria-hidden="true">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+          <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" />
+          <path d="M8 5v3.5M8 11v.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+        </svg>
+      </span>
+      <span class="ca__label">Perguntar Algo</span>
+      <span class="ca__desc">Consulta direta ao assistente</span>
     </button>
-    <kbd>Cmd+Shift+P</kbd>
   </div>
   {#if askOpen}
     <div class="conversation-actions__ask">
@@ -104,6 +118,9 @@
         placeholder="Digite sua pergunta"
         aria-label="Digite sua pergunta"
         bind:value={question}
+        onkeydown={(event) => {
+          if (event.key === 'Enter') void askAnything()
+        }}
       />
       <button
         type="button"
@@ -120,24 +137,66 @@
   .conversation-actions {
     display: flex;
     flex-wrap: wrap;
-    align-items: center;
+    align-items: stretch;
     gap: 0.8rem;
   }
 
   .conversation-actions__item {
     display: flex;
+    flex: 1;
     align-items: center;
     gap: 0.6rem;
   }
 
-  .conversation-actions__button {
+  .ca {
     font: inherit;
-    padding: 0.8rem 1.4rem;
-    color: var(--surface-content);
-    background: var(--surface-fill);
-    border: 0.1rem solid var(--surface-border);
-    border-radius: 1.2rem;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.6rem;
+    padding: 1.2rem 1.4rem;
     cursor: pointer;
+    text-align: left;
+    color: var(--text-p);
+    background: rgba(255, 255, 255, 0.03);
+    border: 0.1rem solid var(--rim);
+    border-radius: 1rem;
+    transition:
+      background 0.12s,
+      border-color 0.12s;
+  }
+
+  .ca:hover {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: rgba(255, 255, 255, 0.15);
+  }
+
+  .ca:focus-visible {
+    outline: 2px solid var(--iris);
+  }
+
+  .ca__icon {
+    width: 2.8rem;
+    height: 2.8rem;
+    border-radius: 0.7rem;
+    background: rgba(255, 255, 255, 0.06);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-s);
+  }
+
+  .ca__label {
+    font-size: 1.2rem;
+    font-weight: 600;
+    color: var(--text-p);
+  }
+
+  .ca__desc {
+    font-size: 1.1rem;
+    color: var(--text-t);
+    line-height: 1.4;
   }
 
   .conversation-actions__ask {
@@ -152,19 +211,36 @@
     font: inherit;
     flex: 1;
     padding: 0.8rem 1.4rem;
-    color: var(--surface-content);
-    background: var(--surface-fill);
-    border: 0.1rem solid var(--surface-border);
-    border-radius: 1.2rem;
+    color: var(--text-p);
+    background: rgba(255, 255, 255, 0.04);
+    border: 0.1rem solid var(--rim);
+    border-radius: 0.8rem;
+  }
+
+  .conversation-actions__button {
+    font: inherit;
+    font-size: 1.2rem;
+    font-weight: 500;
+    padding: 0.6rem 1.4rem;
+    color: #fff;
+    background: var(--iris);
+    border: 0.1rem solid rgba(255, 255, 255, 0.1);
+    border-radius: 0.7rem;
+    cursor: pointer;
+  }
+
+  .conversation-actions__button:hover {
+    opacity: 0.88;
   }
 
   kbd {
     font-family: ui-monospace, monospace;
-    font-size: 1.1rem;
+    font-size: 1rem;
     padding: 0.2rem 0.6rem;
-    color: var(--surface-content);
-    background: var(--surface-fill);
-    border: 0.1rem solid var(--surface-border);
+    color: var(--text-t);
+    background: rgba(255, 255, 255, 0.04);
+    border: 0.1rem solid var(--rim);
     border-radius: 0.6rem;
+    flex-shrink: 0;
   }
 </style>

@@ -26,3 +26,7 @@ prisma/*.db
 # Env
 .env
 .env.local
+
+# sidecar empacotado (gerado por core/scripts/build-sidecar.sh)
+core/resources/sidecar/
+core/target/

@@ -195,7 +195,7 @@ As tasks estão agrupadas em fases por dependência. Dentro de uma fase, as task
 **Pronto quando:** a barra opera os controles; stealth alterna visivelmente.
 
 ### T-402 · Home
-**Objetivo:** Tela principal: busca de sessões, cards de assistente atual e memória, teste/free tier, ações de conversa (Analisar/Capturar/Perguntar com atalhos), sessões recentes (RF-011/333).
+**Objetivo:** Tela principal: busca de sessões, cards de assistente atual e memória, ações de conversa (Analisar/Capturar/Perguntar com atalhos), sessões recentes (RF-011/333). O uso completo é o default — sem free tier/trial.
 **Toca:** `apps/ui/src/surfaces/home/`.
 **Contrato:** ações disparam os comandos/atalhos corretos; lista de sessões vem do sidecar via core.
 **Dependências:** T-400, T-100 (sessões), T-101 (assistentes).
@@ -214,8 +214,8 @@ As tasks estão agrupadas em fases por dependência. Dentro de uma fase, as task
 **Dependências:** T-400, T-303, T-304.
 **Pronto quando:** o Notch mostra o insight atual e navega o histórico via atalhos.
 
-### T-405 · Onboarding (6 passos)
-**Objetivo:** O fluxo ordenado: permissões, áudio, transcrição, análise, comunidade [opcional], trial (RF-101), reabrível (RF-102).
+### T-405 · Onboarding (5 passos)
+**Objetivo:** O fluxo ordenado: permissões, áudio, transcrição, análise, comunidade [opcional, terminal] (RF-101), reabrível (RF-102). O uso completo é o default — sem passo de trial.
 **Toca:** `apps/ui/src/surfaces/onboarding/`.
 **Contrato:** cada passo reflete o estado real (permissões concedidas, dispositivos, provider configurado).
 **Dependências:** T-400, T-301, T-304, T-306.

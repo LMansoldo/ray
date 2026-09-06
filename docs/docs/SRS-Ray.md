@@ -73,7 +73,7 @@ Profissionais de vendas, empreendedores, executivos e diretores, entrevistadores
 O produto expõe quatro superfícies distintas, todas sob a linguagem visual Liquid Glass (ver seção 8):
 
 - **RF-010 — App bar (Barra de Ações):** barra flutuante compacta com grip para arrastar, botão Home, indicador de status, botão que ativa o modo stealth e o botão "Iniciar Configuração" (onboarding). Alternável por atalho, com o mesmo comportamento do menu da bandeja.
-- **RF-011 — Home:** tela principal com busca de sessões passadas, badge de plano, acesso a configurações/perfil, cards de assistente atual, memória em tempo real, teste/free tier, ações de conversa e sessões recentes.
+- **RF-011 — Home:** tela principal com busca de sessões passadas, acesso a configurações/perfil, cards de assistente atual, memória em tempo real, ações de conversa e sessões recentes. O uso completo é o default — não há conceito de plano/free tier/trial.
 - **RF-012 — Overlay / Modal de sessão:** superfície de uso em tempo real que exibe os cards de insight (ver RF-330) e pode ser reposicionada por atalho.
 - **RF-013 — Notch:** superfície compacta de insights em tempo real durante sessões ativas, com histórico navegável (anterior/próximo). Implementada como janela Tauri secundária (transparente, sempre-no-topo, excluída de captura) em todas as plataformas; o que varia é a ancoragem e o material de vidro nativo: no macOS aproveita o entalhe físico e o vibrancy; no Windows ancora no topo-centro/bandeja com material Mica/Acrylic; no Linux é um HUD flutuante com translucidez dependente do compositor (degrada para fundo semi-opaco quando indisponível).
 
@@ -83,7 +83,7 @@ O produto expõe quatro superfícies distintas, todas sob a linguagem visual Liq
 
 ### 4.1 Onboarding e Permissões (RF-100)
 
-- **RF-101** — Fluxo de onboarding em etapas ordenadas: (1) verificação de permissões, (2) configuração de áudio, (3) transcrição, (4) análise de texto e imagem, (5) comunidade e ajuda [opcional], (6) trial de 7 dias [cartão].
+- **RF-101** — Fluxo de onboarding em etapas ordenadas: (1) verificação de permissões, (2) configuração de áudio, (3) transcrição, (4) análise de texto e imagem, (5) comunidade e ajuda [opcional, terminal]. O uso completo é o default — não existe etapa de trial.
 - **RF-102** — O onboarding deve poder ser reiniciado a qualquer momento (via Ajuda → Reiniciar Integração).
 - **RF-103** — Gerenciar as permissões nativas, cada uma vinculada à função que habilita:
   - Microfone → captura de voz (canal VOCÊ);
@@ -145,7 +145,7 @@ Cada função tem seleção de provedor/modelo independente. Quando houver mais 
 
 ### 4.6 Modo Stealth e Controles de Janela (RF-500)
 
-- **RF-501 — Exclusão de captura:** as janelas do app são invisíveis na captura de tela/screenshare, mas visíveis ao usuário.
+- **RF-501 — Exclusão de captura:** as janelas do app são invisíveis na captura de tela/screenshare, mas visíveis ao usuário. O stealth nasce **ativo por padrão** (o uso completo é o default); o usuário pode desativá-lo pela app bar.
   - Windows: `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`;
   - macOS: `NSWindowSharingNone` / `sharingType = none`;
   - Linux: depende do compositor (X11/Wayland); degradar graciosamente e documentar limitações.
@@ -180,11 +180,11 @@ Cada função tem seleção de provedor/modelo independente. Quando houver mais 
 - **RF-803** — Gerar resumo da sessão (pontos-chave, itens de ação).
 - **RF-804** — Revisar e excluir sessões; exportar transcrição/resumo.
 
-### 4.10 Free Tier, Trial e Premium (RF-900)
+### 4.10 Licenciamento (RF-900)
 
-- **RF-901** — Free tier com contador de sessões grátis (ex.: 0 de 5 usadas).
-- **RF-902** — Trial de 7 dias (requer cartão), iniciável pela Home ou onboarding.
-- **RF-903** — Badge de plano e distinção de recursos premium.
+- O uso completo é o default: o produto não possui free tier, trial nem
+  distinção de planos/recursos premium. Os requisitos RF-901..903 foram
+  removidos do escopo.
 
 ### 4.11 Ajuda, Suporte e Diagnóstico (RF-1000)
 

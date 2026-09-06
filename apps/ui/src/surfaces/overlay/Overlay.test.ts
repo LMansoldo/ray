@@ -257,22 +257,6 @@ describe('Overlay — nunca o editor completo no streaming (ADR-011)', () => {
   })
 })
 
-describe('Overlay — ação contextual (RF-331)', () => {
-  it('Ver caso de uso despacha viewUseCase com o suggestionId ativo', async () => {
-    const received: OverlayAction[] = []
-    unsubscribeAction = onOverlayAction((action: OverlayAction) => received.push(action))
-
-    const { container, getByRole } = render(Overlay, { props: baseProps })
-    await emit({ type: 'start', suggestionId: 's-7', contextLabel: 'Reunião' })
-    await waitFor(() => {
-      expect(container.querySelector('[data-insight-card]')).not.toBeNull()
-    })
-
-    await fireEvent.click(getByRole('button', { name: 'Ver caso de uso' }))
-    expect(received).toEqual([{ type: 'viewUseCase', suggestionId: 's-7' }])
-  })
-})
-
 describe('Overlay — posição (RF-012 / RF-507, parte UI)', () => {
   it('renderiza na posição recebida por prop e responde à mudança dela', async () => {
     const { container, rerender } = render(Overlay, { props: baseProps })

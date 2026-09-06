@@ -8,7 +8,7 @@ import { onOverlayAction, type OverlayAction } from './overlay-actions'
 // Contrato T-403 / RF-331: o card de insight é o layout canônico do overlay
 // (e do Notch, T-404): contexto da situação com ícone no topo, bloco
 // "ELES DISSERAM" com a fala do outro falante, bloco "DIGA ISSO" com a
-// resposta sugerida e ação contextual "Ver caso de uso".
+// resposta sugerida.
 //
 // O DIGA ISSO renderiza markdown via o renderizador read-only de streaming do
 // T-408 (MarkdownView, lib/markdown) — NUNCA o editor Milkdown (ADR-011:
@@ -80,7 +80,7 @@ afterEach(() => {
 })
 
 describe('InsightCard — layout canônico (RF-331)', () => {
-  it('renderiza contexto com ícone no topo, ELES DISSERAM, DIGA ISSO e Ver caso de uso', () => {
+  it('renderiza contexto com ícone no topo, ELES DISSERAM e DIGA ISSO', () => {
     const { container, getByRole } = render(InsightCard, {
       props: baseProps(
         makeState({
@@ -103,7 +103,6 @@ describe('InsightCard — layout canônico (RF-331)', () => {
     expect(theySaid?.textContent).toContain('Qual o preço?')
     expect(sayThis?.textContent).toContain('DIGA ISSO')
     expect(sayThis?.textContent).toContain('Sugiro responder')
-    expect(getByRole('button', { name: 'Ver caso de uso' }), 'ação contextual RF-331').toBeDefined()
 
     expectBefore(context, theySaid, 'contexto deve vir antes de ELES DISSERAM (RF-331)')
     expectBefore(theySaid, sayThis, 'ELES DISSERAM deve vir antes de DIGA ISSO (RF-331)')
@@ -242,19 +241,6 @@ describe('InsightCard — rolagem automática (RF-701)', () => {
   })
 })
 
-describe('InsightCard — ação contextual "Ver caso de uso" (RF-331)', () => {
-  it('despacha viewUseCase com o suggestionId ativo pelo canal overlay-actions', async () => {
-    const received: OverlayAction[] = []
-    unsubscribeAction = onOverlayAction((action: OverlayAction) => received.push(action))
-
-    const { getByRole } = render(InsightCard, {
-      props: baseProps(makeState({ suggestionId: 's-42', text: 'Olá' })),
-    })
-    await fireEvent.click(getByRole('button', { name: 'Ver caso de uso' }))
-
-    expect(received).toEqual([{ type: 'viewUseCase', suggestionId: 's-42' }])
-  })
-})
 
 describe('InsightCard — regras gerais do repo', () => {
   it('a saída renderizada não contém emojis, inclusive no estado de erro', () => {

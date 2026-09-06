@@ -1,19 +1,51 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import {
   setSettingsStateFeed,
   resetSettingsStateFeed,
   readSettingsState,
+  loadSettingsState,
 } from './settings-feed'
 import type { SettingsState } from './types'
-import { DEFAULT_SHORTCUTS } from '../../../../../contracts/settings'
+import {
+  DEFAULT_FEATURE_TOGGLES,
+  DEFAULT_SHORTCUTS,
+} from '../../../../../contracts/settings'
 
 // Contrato T-406: adaptador local de estado das Configurações — mesmo padrão
-// do state-feed.ts do T-405. O comando core que forneceria esse estado ainda
-// não existe (core/src/lib.rs registra apenas set_stealth/toggle_window/
-// suggest/transcribe_pending_pcm) — quando existir, o feed padrão passa a
-// lê-lo via invoke(). Por ora o padrão é um placeholder RESTRITIVO: nada
+// do state-feed.ts do T-405. loadSettingsState hidrata dos comandos core
+// registrados (core/src/lib.rs): get_provider_statuses, get_permission_status,
+// get_shortcuts, get_app_settings + getVersion (@tauri-apps/api/app). Cada
+// consulta é opcional (falha → base do feed) e loadSettingsState NUNCA
+// rejeita. O feed padrão continua um placeholder RESTRITIVO: nada
 // configurado, tudo ausente — as abas nunca exibem um estado "conectado"
 // inventado sem verificação real.
+
+const { invokeMock, getVersionMock } = vi.hoisted(() => ({
+  invokeMock: vi.fn<(command: string, args?: unknown) => Promise<unknown>>(),
+  getVersionMock: vi.fn<() => Promise<string>>(),
+}))
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }))
+vi.mock('@tauri-apps/api/app', () => ({ getVersion: getVersionMock }))
+
+// Node 25 expõe um localStorage global experimental SEM métodos, que sombreia
+// o do jsdom (window === globalThis no vitest). Instalamos um Storage em
+// memória para exercitar a leitura real da preferência de medidores.
+function installMemoryStorage(): void {
+  const store = new Map<string, string>()
+  const storage: Storage = {
+    get length() {
+      return store.size
+    },
+    clear: () => store.clear(),
+    getItem: (key) => (store.has(key) ? (store.get(key) as string) : null),
+    key: (index) => Array.from(store.keys())[index] ?? null,
+    removeItem: (key) => void store.delete(key),
+    setItem: (key, value) => void store.set(key, value),
+  }
+  Object.defineProperty(window, 'localStorage', { value: storage, configurable: true })
+}
+installMemoryStorage()
 
 describe('settings-feed — placeholder restritivo (sem comando core)', () => {
   it('o padrão declara tudo não configurado (nunca inventa estado)', () => {
@@ -39,6 +71,7 @@ describe('settings-feed — placeholder restritivo (sem comando core)', () => {
     }
 
     expect(state.shortcuts).toEqual(DEFAULT_SHORTCUTS)
+    expect(state.features).toEqual(DEFAULT_FEATURE_TOGGLES)
   })
 })
 
@@ -69,6 +102,7 @@ describe('settings-feed — injeção e leitura', () => {
       },
       appVersion: '0.0.0',
       shortcuts: DEFAULT_SHORTCUTS,
+      features: { ...DEFAULT_FEATURE_TOGGLES },
     }
 
     setSettingsStateFeed(() => state)
@@ -100,6 +134,7 @@ describe('settings-feed — injeção e leitura', () => {
       },
       appVersion: '2.1.3',
       shortcuts: DEFAULT_SHORTCUTS,
+      features: { ...DEFAULT_FEATURE_TOGGLES },
     }))
     expect(readSettingsState().providerStatus.deepseek).toBe('connected')
 
@@ -107,5 +142,180 @@ describe('settings-feed — injeção e leitura', () => {
 
     expect(readSettingsState().providerStatus.deepseek).toBe('notConfigured')
     expect(readSettingsState().appVersion).toBe('0.0.0')
+  })
+})
+
+describe('settings-feed — hidratação do core (loadSettingsState)', () => {
+  afterEach(() => {
+    resetSettingsStateFeed()
+    invokeMock.mockReset()
+    getVersionMock.mockReset()
+    window.localStorage.removeItem('ray_audio_meters')
+    window.localStorage.removeItem('ray_models')
+  })
+
+  /** Roteia o invokeMock: comandos em `overrides` resolvem; o resto rejeita
+   *  (simula sidecar/core ausente — cada falha cai na base). */
+  function mockInvoke(overrides: Record<string, unknown> = {}): void {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command in overrides) {
+        return overrides[command]
+      }
+      throw new Error(`core não responde: ${command}`)
+    })
+  }
+
+  function offlineApp(): void {
+    getVersionMock.mockRejectedValue(new Error('fora do Tauri'))
+  }
+
+  it('nunca rejeita: com core inteiramente fora, devolve a base intacta', async () => {
+    offlineApp()
+    invokeMock.mockRejectedValue(new Error('sidecar not started'))
+
+    const state = await loadSettingsState()
+
+    expect(state).toEqual(readSettingsState())
+    expect(state.appVersion).toBe('0.0.0')
+    expect(state.features).toEqual(DEFAULT_FEATURE_TOGGLES)
+    expect(state.metersVisible).toBe(true)
+  })
+
+  it('status de provedor continuam de get_provider_statuses (salvo ≠ conectado)', async () => {
+    offlineApp()
+    mockInvoke({
+      get_provider_statuses: {
+        credentials: [
+          {
+            id: 'c1',
+            slot: 'deepseek',
+            kind: 'DEEPSEEK',
+            connectionMode: 'API_KEY',
+            secretRef: 'vault:deepseek',
+            lastValidatedAt: '2026-01-01T00:00:00Z',
+          },
+          {
+            id: 'c2',
+            slot: 'openrouter',
+            kind: 'OPENROUTER',
+            connectionMode: 'AGGREGATOR',
+            secretRef: 'vault:openrouter',
+            lastValidatedAt: undefined,
+          },
+        ],
+      },
+    })
+
+    const state = await loadSettingsState()
+
+    expect(state.providerStatus.deepseek).toBe('connected')
+    expect(state.providerStatus.openrouter).toBe('saved')
+    expect(state.providerStatus.anthropic).toBe('notConfigured')
+  })
+
+  it('hidrata permissões de get_permission_status (só granted conta)', async () => {
+    offlineApp()
+    mockInvoke({
+      get_provider_statuses: { credentials: [] },
+      get_permission_status: {
+        microphone: 'granted',
+        screenRecording: 'denied',
+        accessibility: 'notGranted',
+        speechRecognition: 'granted',
+      },
+    })
+
+    const state = await loadSettingsState()
+
+    expect(state.permissions).toEqual({
+      microphone: 'granted',
+      screenRecording: 'notGranted',
+      accessibility: 'notGranted',
+      speechRecognition: 'granted',
+    })
+  })
+
+  it('get_permission_status inválido/ausente preserva as permissões da base', async () => {
+    offlineApp()
+    mockInvoke({
+      get_provider_statuses: { credentials: [] },
+      get_permission_status: undefined,
+    })
+
+    const state = await loadSettingsState()
+
+    expect(state.permissions).toEqual(readSettingsState().permissions)
+  })
+
+  it('hidrata atalhos de get_shortcuts (valores null ou {enabled,modifiers,key})', async () => {
+    offlineApp()
+    mockInvoke({
+      get_provider_statuses: { credentials: [] },
+      get_shortcuts: {
+        ...DEFAULT_SHORTCUTS,
+        askOrSend: { enabled: false, modifiers: ['Ctrl'], key: 'Q' },
+      },
+    })
+
+    const state = await loadSettingsState()
+
+    expect(state.shortcuts.askOrSend).toEqual({ enabled: false, modifiers: ['Ctrl'], key: 'Q' })
+    expect(state.shortcuts.captureScreen).toEqual(DEFAULT_SHORTCUTS.captureScreen)
+  })
+
+  it('get_shortcuts com forma inválida é descartado (mantém a base)', async () => {
+    offlineApp()
+    mockInvoke({
+      get_provider_statuses: { credentials: [] },
+      get_shortcuts: { askOrSend: 'Cmd+Enter' },
+    })
+
+    const state = await loadSettingsState()
+
+    expect(state.shortcuts).toEqual(DEFAULT_SHORTCUTS)
+  })
+
+  it('hidrata features de get_app_settings (só chaves booleanas do contrato)', async () => {
+    offlineApp()
+    mockInvoke({
+      get_provider_statuses: { credentials: [] },
+      get_app_settings: { features: { autoScroll: false, chaveDesconhecida: true } },
+    })
+
+    const state = await loadSettingsState()
+
+    expect(state.features).toEqual({ ...DEFAULT_FEATURE_TOGGLES, autoScroll: false })
+  })
+
+  it('get_app_settings rejeitando mantém DEFAULT_FEATURE_TOGGLES', async () => {
+    offlineApp()
+    mockInvoke({ get_provider_statuses: { credentials: [] } })
+
+    const state = await loadSettingsState()
+
+    expect(state.features).toEqual(DEFAULT_FEATURE_TOGGLES)
+  })
+
+  it('hidrata a versão real do app via getVersion()', async () => {
+    getVersionMock.mockResolvedValue('3.1.4')
+    mockInvoke({ get_provider_statuses: { credentials: [] } })
+
+    const state = await loadSettingsState()
+
+    expect(state.appVersion).toBe('3.1.4')
+  })
+
+  it('medidores vêm da preferência local ray_audio_meters (ausente = visível)', async () => {
+    offlineApp()
+    mockInvoke({ get_provider_statuses: { credentials: [] } })
+
+    window.localStorage.setItem('ray_audio_meters', '0')
+    expect((await loadSettingsState()).metersVisible).toBe(false)
+
+    window.localStorage.setItem('ray_audio_meters', '1')
+    expect((await loadSettingsState()).metersVisible).toBe(true)
+
+    window.localStorage.removeItem('ray_audio_meters')
+    expect((await loadSettingsState()).metersVisible).toBe(true)
   })
 })

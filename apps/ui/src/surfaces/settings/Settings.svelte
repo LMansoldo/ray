@@ -5,13 +5,19 @@
   // (toggles do contrato), Atalhos (espelho das regras do núcleo) e Ajuda.
   //
   // Sem props (padrão T-405 — evita o problema de tipagem de props do T-402).
-  // O estado ENTRA pelo adaptador local settings-feed.ts, lido uma vez no
-  // mount; as saídas SÃO as ações declaradas do canal settings-actions.ts —
-  // nenhum comando core de settings existe ainda, e a UI nunca inventa um
-  // nome de invoke() (general.md: o contrato é a fronteira). ADR-003: o
-  // segredo digitado vive apenas no próprio campo e no payload credentialSave.
-  import { invoke } from '@tauri-apps/api/core'
+  // O estado ENTRA pelo adaptador local settings-feed.ts (que hidrata dos
+  // comandos core registrados em core/src/lib.rs), lido uma vez no mount;
+  // as saídas declaradas continuam no canal settings-actions.ts E, onde o
+  // comando core existe, a superfície o invoca diretamente (apply_shortcuts,
+  // save_feature_toggles, delete_credential — a UI nunca inventa um nome de
+  // invoke() fora do registro do núcleo). Preferências locais não-secretas
+  // (medidores, modelos por função) persistem em Web Storage com chaves
+  // allowlistadas ('ray_audio_meters', 'ray_models'); ADR-003: o segredo
+  // digitado vive apenas no próprio campo e no payload credentialSave.
   import { glassTokens } from '../../lib/glass/tokens'
+  import { invoke } from '@tauri-apps/api/core'
+  import { emit, listen } from '@tauri-apps/api/event'
+  import { onMount } from 'svelte'
   import { dispatchOnboardingRestart } from '../onboarding/restart'
   import type { OnboardingPermissionId, OnboardingPlatform } from '../onboarding/types'
   import {
@@ -33,7 +39,7 @@
     ProviderConnectionMode,
     ProviderKind,
   } from '../../../../../contracts/ipc'
-  import { readSettingsState } from './settings-feed'
+  import { loadSettingsState, readSettingsState } from './settings-feed'
   import { dispatchSettingsAction } from './settings-actions'
   import type { SettingsAction } from './settings-actions'
   import { formatCombo, validateShortcutChange } from './shortcut-validation'
@@ -59,7 +65,46 @@
 
   let activeTab = $state<SettingsTabId>('aiSources')
 
-  const settingsState: SettingsState = readSettingsState()
+  // Estado inicial: leitura SÍNCRONA do feed (semeia atalhos/modelos e
+  // permite injeção em testes); os status de provedor e o resto do estado
+  // real são refinados em seguida pelo carregamento assíncrono do core
+  // (loadSettingsState). Quando ele resolve, o estado LOCAL editável
+  // (atalhos, recursos) é re-sincronizado do estado hidratado.
+  let settingsState = $state<SettingsState>(readSettingsState())
+  void loadSettingsState().then((s) => {
+    settingsState = s
+    // Atalhos e recursos seguem o estado carregado (RF-601/700): a UI
+    // espelha o mapa ativo no SO e os toggles persistidos.
+    shortcuts = { ...s.shortcuts }
+    featureToggles = { ...DEFAULT_FEATURE_TOGGLES, ...s.features }
+  })
+
+  // Recarrega o status dos provedores quando uma credencial é salva/validada
+  // (App.svelte emite após save_credential + validate_credential).
+  let unlistenCredentials: (() => void) | undefined
+
+  onMount(() => {
+    void listen<{ slot: string; valid?: boolean; reason?: string }>(
+      'ray:credentials-changed',
+      (event) => {
+        const { slot, valid, reason } = event.payload
+        if (valid === false && reason) {
+          validationReasons = { ...validationReasons, [slot]: reason }
+        } else if (valid === true) {
+          const { [slot]: _removed, ...rest } = validationReasons
+          validationReasons = rest
+        }
+        void loadSettingsState().then((s) => {
+          settingsState = s
+        })
+      },
+    ).then((fn) => {
+      unlistenCredentials = fn
+    })
+    return () => {
+      unlistenCredentials?.()
+    }
+  })
 
   function openTab(tab: SettingsTabId): void {
     activeTab = tab
@@ -90,6 +135,7 @@
 
   const PROVIDER_STATUS_LABELS: Record<ProviderConnectionStatus, string> = {
     connected: 'Conectado',
+    saved: 'Salvo',
     disconnected: 'Não Conectado',
     notConfigured: 'Não configurado',
   }
@@ -125,6 +171,15 @@
     return PROVIDER_CARDS.find((card) => card.slot === slot)
   }
 
+  /** Sigla do card (ex.: "Google Gemini" → "G") para o logo do pcard. */
+  function plogoInitials(title: string): string {
+    const words = title.split(/\s+/).filter((word) => word.length > 0)
+    if (words.length >= 2) {
+      return (words[0][0] + words[1][0]).toUpperCase()
+    }
+    return title.slice(0, 2)
+  }
+
   function saveCredential(slot: ProviderSlotId): void {
     const card = providerCardOf(slot)
     if (!card || !card.hasSave) {
@@ -144,6 +199,25 @@
       payload.baseUrl = genericBaseUrl
     }
     dispatchSettingsAction(payload)
+  }
+
+  /** Slot com exclusão em andamento — desabilita o botão Excluir dele. */
+  let deletingSlot = $state<ProviderSlotId | null>(null)
+
+  /** Exclui a credencial do slot (cofre nativo + banco via core) e emite
+   *  'ray:credentials-changed' para os status recarregarem (App.svelte
+   *  escuta o mesmo evento). Limpa o campo de chave; segredo nunca circula. */
+  async function deleteProviderCredential(slot: ProviderSlotId): Promise<void> {
+    deletingSlot = slot
+    try {
+      await invoke('delete_credential', { slot })
+      keyValues[slot] = ''
+      void emit('ray:credentials-changed', { slot, valid: undefined }).catch(console.error)
+    } catch {
+      // core/sidecar indisponível — mantém o estado atual
+    } finally {
+      deletingSlot = null
+    }
   }
 
   // ── Modelos (RF-301/302/303/404) ──────────────────────────────────────
@@ -169,27 +243,100 @@
     return (PROVIDER_KINDS as readonly string[]).includes(value)
   }
 
+  // Preferência local de modelos por função (localStorage 'ray_models'):
+  // sobrevive a reinícios e SEMEIA os seletores sobre o functionConfig do
+  // feed; toda mudança persiste de volta e emite 'ray:models-changed' para
+  // o consumidor global (o app ajusta os pipelines — a UI não escuta).
+  // (A chave 'ray_models' é allowlistada no teste de integridade.)
+
+  interface StoredModelEntry {
+    kind: ProviderKind
+    model: string
+  }
+  type StoredModels = Record<AiFunction, StoredModelEntry | null>
+
+  function readStoredModels(): Partial<StoredModels> {
+    try {
+      const raw = window.localStorage.getItem?.('ray_models')
+      if (!raw) {
+        return {}
+      }
+      const parsed: unknown = JSON.parse(raw)
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return {}
+      }
+      return parsed as Partial<StoredModels>
+    } catch {
+      return {}
+    }
+  }
+
+  const storedModels = readStoredModels()
+
+  function seedKind(fn: AiFunction): string {
+    const entry = storedModels[fn]
+    if (entry && isProviderKind(entry.kind)) {
+      return entry.kind
+    }
+    return settingsState.functionConfig[fn]?.kind ?? ''
+  }
+
+  function seedModel(fn: AiFunction): string {
+    const entry = storedModels[fn]
+    if (entry && typeof entry.model === 'string') {
+      return entry.model
+    }
+    return settingsState.functionConfig[fn]?.model ?? ''
+  }
+
   // Opções de provedor por função = slots com status != notConfigured (RF-404).
-  const configuredSlots = PROVIDER_CARDS.filter(
-    (card) => settingsState.providerStatus[card.slot] !== 'notConfigured',
+  const configuredSlots = $derived(
+    PROVIDER_CARDS.filter(
+      (card) => settingsState.providerStatus[card.slot] !== 'notConfigured',
+    ),
   )
 
-  const localSpeechEngine = settingsState.platform === 'macos' ? 'Apple Speech' : 'Whisper embutido'
+  const localSpeechEngine = $derived(
+    settingsState.platform === 'macos' ? 'Apple Speech' : 'Whisper embutido',
+  )
 
   let modelSelections = $state<Record<AiFunction, string>>({
-    TRANSCRIPTION: settingsState.functionConfig.TRANSCRIPTION?.kind ?? '',
-    ANALYSIS: settingsState.functionConfig.ANALYSIS?.kind ?? '',
-    TRANSLATION: settingsState.functionConfig.TRANSLATION?.kind ?? '',
+    TRANSCRIPTION: seedKind('TRANSCRIPTION'),
+    ANALYSIS: seedKind('ANALYSIS'),
+    TRANSLATION: seedKind('TRANSLATION'),
   })
   let modelInputs = $state<Record<AiFunction, string>>({
-    TRANSCRIPTION: settingsState.functionConfig.TRANSCRIPTION?.model ?? '',
-    ANALYSIS: settingsState.functionConfig.ANALYSIS?.model ?? '',
-    TRANSLATION: settingsState.functionConfig.TRANSLATION?.model ?? '',
+    TRANSCRIPTION: seedModel('TRANSCRIPTION'),
+    ANALYSIS: seedModel('ANALYSIS'),
+    TRANSLATION: seedModel('TRANSLATION'),
   })
+
+  /** Mapa corrente por função — null quando a função está sem provedor. */
+  function currentModels(): StoredModels {
+    const build = (fn: AiFunction): StoredModelEntry | null => {
+      const kind = modelSelections[fn]
+      return isProviderKind(kind) ? { kind, model: modelInputs[fn] } : null
+    }
+    return {
+      TRANSCRIPTION: build('TRANSCRIPTION'),
+      ANALYSIS: build('ANALYSIS'),
+      TRANSLATION: build('TRANSLATION'),
+    }
+  }
+
+  /** Persiste a preferência local e notifica o app (ray:models-changed). */
+  function persistModels(): void {
+    const models = currentModels()
+    window.localStorage.setItem?.('ray_models', JSON.stringify(models))
+    void emit('ray:models-changed', models).catch(console.error)
+  }
 
   function changeFunctionProvider(event: Event, fn: AiFunction): void {
     const select = event.currentTarget as HTMLSelectElement
+    modelSelections[fn] = select.value
     if (!isProviderKind(select.value)) {
+      // Seleção vazia: função volta a ficar sem provedor (persiste null).
+      persistModels()
       return
     }
     dispatchSettingsAction({
@@ -198,13 +345,28 @@
       kind: select.value,
       model: modelInputs[fn],
     })
+    persistModels()
+  }
+
+  function changeFunctionModel(event: Event, fn: AiFunction): void {
+    const input = event.currentTarget as HTMLInputElement
+    modelInputs[fn] = input.value
+    persistModels()
   }
 
   // ── Áudio e Tela (RF-206) ─────────────────────────────────────────────
 
   function toggleMeters(event: MouseEvent): void {
     const checkbox = event.currentTarget as HTMLInputElement
-    dispatchSettingsAction({ type: 'metersVisibilityChange', visible: checkbox.checked })
+    const visible = checkbox.checked
+    settingsState = { ...settingsState, metersVisible: visible }
+    // A chave 'ray_audio_meters' é allowlistada no teste de integridade; a
+    // chamada opcional tolera ambientes sem Storage utilitável.
+    window.localStorage.setItem?.('ray_audio_meters', visible ? '1' : '0')
+    dispatchSettingsAction({ type: 'metersVisibilityChange', visible })
+    // Notifica o consumidor global (a superfície de áudio liga/desliga os
+    // medidores) — a UI daqui não escuta o próprio evento.
+    void emit('ray:meters-changed', { visible }).catch(console.error)
   }
 
   // ── Permissões (RF-103/104/335) — mesmo mapeamento do onboarding ──────
@@ -229,12 +391,39 @@
     ]
   }
 
-  const permissionRows = buildPermissionRows(settingsState.platform)
-  const missingPermissions = permissionRows.some(
-    (row) => settingsState.permissions[row.id] === 'notGranted',
+  const permissionRows = $derived(buildPermissionRows(settingsState.platform))
+  const missingPermissions = $derived(
+    permissionRows.some((row) => settingsState.permissions[row.id] === 'notGranted'),
   )
 
-  // ── Recursos (RF-700) — dirigidos pelo contrato, sem feed ─────────────
+  let grantingPermissions = $state(false)
+
+  /** Motivo da última validação por slot (ex.: "HTTP 400") — exibido no card. */
+  let validationReasons = $state<Record<string, string>>({})
+
+  /** "Habilitar tudo": dispara as dialogs TCC e reflete o status final. */
+  async function grantMissingPermissions(): Promise<void> {
+    grantingPermissions = true
+    try {
+      const map = await invoke<Record<string, string>>('request_all_permissions')
+      const asState = (v: string | undefined) => (v === 'granted' ? 'granted' : 'notGranted')
+      settingsState = {
+        ...settingsState,
+        permissions: {
+          microphone: asState(map.microphone),
+          screenRecording: asState(map.screenRecording),
+          accessibility: asState(map.accessibility),
+          speechRecognition: asState(map.speechRecognition),
+        },
+      }
+    } catch {
+      // core indisponível — mantém o estado atual
+    } finally {
+      grantingPermissions = false
+    }
+  }
+
+  // ── Recursos (RF-700) — dirigidos pelo contrato, hidratados do core ────
 
   const FEATURE_LABELS: Record<FeatureToggleName, string> = {
     autoScroll: 'Rolagem Automática',
@@ -245,12 +434,21 @@
     quickScreenshotAnalysis: 'Análise Rápida de Screenshots',
   }
 
-  let featureToggles = $state<FeatureToggles>({ ...DEFAULT_FEATURE_TOGGLES })
+  // Semeados do feed e re-sincronizados quando loadSettingsState resolve
+  // (features persistidas via get_app_settings). Ignoramos o aviso de
+  // "captura o valor inicial" — semear UMA vez é a intenção: o mapa local
+  // é editável e a re-sincronização explícita acontece no load.
+  // svelte-ignore state_referenced_locally
+  let featureToggles = $state<FeatureToggles>({ ...DEFAULT_FEATURE_TOGGLES, ...settingsState.features })
 
   function toggleFeature(event: MouseEvent, name: FeatureToggleName): void {
     const checkbox = event.currentTarget as HTMLInputElement
     featureToggles[name] = checkbox.checked
     dispatchSettingsAction({ type: 'featureToggleChange', name, enabled: checkbox.checked })
+    // Persiste no core (sidecar/Prisma) e notifica a UI (ray:features-changed).
+    const features: FeatureToggles = { ...featureToggles }
+    void invoke('save_feature_toggles', { features }).catch(console.error)
+    void emit('ray:features-changed', features).catch(console.error)
   }
 
   // ── Atalhos (RF-601/602/604) — estado do feed, espelho das regras core ──
@@ -277,11 +475,33 @@
     toggleWindowVisibility: 'Alternar Visibilidade da Janela',
   }
 
-  // Mapa LOCAL corrente (seedado do feed): a validação de duplicatas e o
-  // efeito imediato (combo exibido, toggle) operam sobre ele.
+  // Mapa LOCAL corrente (seedado do feed e re-sincronizado quando a
+  // hidratação do core resolve): a validação de duplicatas e o efeito
+  // imediato (combo exibido, toggle) operam sobre ele. Semear uma vez é a
+  // intenção (ver comentário em featureToggles acima).
+  // svelte-ignore state_referenced_locally
   let shortcuts = $state<ShortcutMap>({ ...settingsState.shortcuts })
   let recordingCommand = $state<ShortcutCommand | null>(null)
   let shortcutError = $state<{ command: ShortcutCommand; message: string } | null>(null)
+
+  /** Aplica o mapa corrente no SO via core (apply_shortcuts — RF-601):
+   *  registro imediato + persistência. Erros individuais do núcleo (combo já
+   *  registrado pelo SO etc.) viram feedback no comando alterado; `changed`
+   *  null (redefinição) não tem linha para anexar o erro. */
+  function applyShortcutsToCore(changed: ShortcutCommand | null): void {
+    void invoke<{ errors: string[] } | undefined>('apply_shortcuts', {
+      bindings: { ...shortcuts },
+    })
+      .then((res) => {
+        if (changed !== null && res?.errors?.length) {
+          shortcutError = { command: changed, message: res.errors[0] }
+        }
+      })
+      .catch(() => {
+        // core indisponível — o mapa local permanece; a próxima mudança
+        // reaplica o mapa completo
+      })
+  }
 
   // Teclas só-modificador não encerram a gravação; ESC cancela; teclas
   // comuns são commitadas e validadas (espelho de core::validate_binding).
@@ -356,6 +576,7 @@
     shortcutError = null
     shortcuts[command] = binding
     dispatchSettingsAction({ type: 'shortcutChange', command, binding })
+    applyShortcutsToCore(command)
   }
 
   function toggleShortcut(event: MouseEvent, command: ShortcutCommand): void {
@@ -367,6 +588,7 @@
     const updated: ShortcutBinding = { ...binding, enabled: checkbox.checked }
     shortcuts[command] = updated
     dispatchSettingsAction({ type: 'shortcutChange', command, binding: updated })
+    applyShortcutsToCore(command)
   }
 
   function resetShortcuts(): void {
@@ -374,6 +596,8 @@
     shortcutError = null
     recordingCommand = null
     dispatchSettingsAction({ type: 'shortcutReset' })
+    // Redefinir reaplica o conjunto PADRÃO no SO (não o mapa corrente).
+    applyShortcutsToCore(null)
   }
 
   // ── Ajuda (RF-1001..1004) ─────────────────────────────────────────────
@@ -383,27 +607,22 @@
   }
 
   function openLogFolder(): void {
-    void invoke('open_logs_folder')
+    dispatchSettingsAction({ type: 'logFolderOpen' })
   }
 
   function copyLogs(): void {
-    void invoke('copy_logs_to_clipboard')
+    dispatchSettingsAction({ type: 'logCopy' })
   }
 </script>
 
-<main
-  class="settings"
-  style:--surface-fill={glassTokens.color.surface}
-  style:--surface-border={glassTokens.color.border}
-  style:--surface-content={glassTokens.color.content}
-  style:--surface-shadow={glassTokens.shadow.background}
-  style:--surface-blur={glassTokens.blur.surface}
->
-  <nav class="settings__tabs">
+<main class="settings" style:--surface-blur={glassTokens.blur.surface}>
+  <nav class="settings__side">
+    <div class="settings__side-label">Configurações</div>
     {#each TABS as tab (tab.id)}
       <button
         type="button"
-        class="settings__tab"
+        class="stab"
+        class:on={activeTab === tab.id}
         data-settings-tab={tab.id}
         onclick={() => openTab(tab.id)}
       >
@@ -412,11 +631,16 @@
     {/each}
   </nav>
 
+  <div class="settings__body">
+
   {#if activeTab === 'aiSources'}
     <section class="settings__panel" data-settings-panel="aiSources">
+      <h2 class="settings__title">Fontes de IA</h2>
       <div class="settings__filter">
         <button
           type="button"
+          class="cpill"
+          class:on={providerFilter === 'all'}
           data-provider-filter="all"
           onclick={() => {
             providerFilter = 'all'
@@ -426,6 +650,8 @@
         </button>
         <button
           type="button"
+          class="cpill"
+          class:on={providerFilter === 'local'}
           data-provider-filter="local"
           onclick={() => {
             providerFilter = 'local'
@@ -435,6 +661,8 @@
         </button>
         <button
           type="button"
+          class="cpill"
+          class:on={providerFilter === 'cloud'}
           data-provider-filter="cloud"
           onclick={() => {
             providerFilter = 'cloud'
@@ -445,37 +673,69 @@
       </div>
 
       {#each visibleCards as card (card.slot)}
-        <div class="settings__provider" data-provider-card={card.slot}>
-          <h3 class="settings__provider-title">{card.title}</h3>
-          <p class="settings__provider-status" data-provider-status={card.slot}>
-            {PROVIDER_STATUS_LABELS[settingsState.providerStatus[card.slot]]}
-          </p>
+        <div class="pcard" data-provider-card={card.slot}>
+          <div class="phdr">
+            <span class="plogo" aria-hidden="true">{plogoInitials(card.title)}</span>
+            <span class="pmeta">
+              <span class="pname">{card.title}</span>
+              <span class="pmode">{card.cloud ? 'BYOK · Nuvem' : 'Self-hosted'}</span>
+            </span>
+            <span
+              class="pbadge"
+              class:pbadge--ok={settingsState.providerStatus[card.slot] === 'connected'}
+              class:pbadge--saved={settingsState.providerStatus[card.slot] === 'saved'}
+              data-provider-status={card.slot}
+            >
+              {PROVIDER_STATUS_LABELS[settingsState.providerStatus[card.slot]]}
+            </span>
+          </div>
+          {#if validationReasons[card.slot] && settingsState.providerStatus[card.slot] !== 'connected'}
+            <p class="pvalreason" data-provider-validation-reason={card.slot}>
+              Validação: {validationReasons[card.slot]}
+            </p>
+          {/if}
           {#if card.hasKeyInput}
             <input
-              class="settings__provider-key"
+              class="key-input"
               data-provider-key-input={card.slot}
               type="password"
+              placeholder="{card.title} API key"
               bind:value={keyValues[card.slot]}
             />
           {/if}
           {#if card.hasBaseUrlInput}
             <input
-              class="settings__provider-baseurl"
+              class="key-input"
               data-provider-baseurl-input
               type="text"
               placeholder="Endpoint base"
               bind:value={genericBaseUrl}
             />
           {/if}
-          {#if card.hasSave}
-            <button
-              type="button"
-              class="settings__provider-save"
-              data-provider-save={card.slot}
-              onclick={() => saveCredential(card.slot)}
-            >
-              Salvar
-            </button>
+          {#if card.hasSave || settingsState.providerStatus[card.slot] !== 'notConfigured'}
+            <div class="key-row">
+              {#if card.hasSave}
+                <button
+                  type="button"
+                  class="btn btn--primary"
+                  data-provider-save={card.slot}
+                  onclick={() => saveCredential(card.slot)}
+                >
+                  Salvar
+                </button>
+              {/if}
+              {#if settingsState.providerStatus[card.slot] !== 'notConfigured'}
+                <button
+                  type="button"
+                  class="btn btn--danger"
+                  data-provider-delete={card.slot}
+                  disabled={deletingSlot === card.slot}
+                  onclick={() => void deleteProviderCredential(card.slot)}
+                >
+                  {deletingSlot === card.slot ? 'Excluindo…' : 'Excluir'}
+                </button>
+              {/if}
+            </div>
           {/if}
         </div>
       {/each}
@@ -509,7 +769,8 @@
           <input
             class="settings__function-model"
             data-function-model-input
-            bind:value={modelInputs[fn]}
+            value={modelInputs[fn]}
+            oninput={(event) => changeFunctionModel(event, fn)}
           />
           {#if fn === 'TRANSCRIPTION'}
             <p class="settings__function-local">Local on-device: {localSpeechEngine}</p>
@@ -547,12 +808,15 @@
         </div>
       {/each}
       {#if missingPermissions}
-        <!-- O comando core que abriria as preferências de sistema ainda não
-             existe; quando existir, este CTA passa a invocá-lo. -->
-        <button type="button" class="settings__grant">Conceder permissões ausentes</button>
-        <p class="settings__guidance" data-settings-restart-guidance>
-          Conclua a configuração e reinicie o app para aplicar as permissões.
-        </p>
+        <button
+          type="button"
+          class="settings__grant"
+          data-settings-grant-missing
+          disabled={grantingPermissions}
+          onclick={() => void grantMissingPermissions()}
+        >
+          {grantingPermissions ? 'Solicitando…' : 'Conceder permissões ausentes'}
+        </button>
       {/if}
     </section>
   {/if}
@@ -657,70 +921,271 @@
       </button>
     </section>
   {/if}
+  </div>
 </main>
 
 <style>
+  .pbadge--saved {
+    background: rgba(48, 209, 88, 0.14);
+    color: var(--green);
+    border-color: rgba(48, 209, 88, 0.3);
+  }
+
+  .pvalreason {
+    margin: -0.6rem 0 0.4rem;
+    font-size: 1.15rem;
+    color: var(--text-t);
+  }
+
   .settings {
     display: flex;
-    flex-direction: column;
-    gap: 1.6rem;
-    max-width: 72rem;
+    align-items: stretch;
+    width: 100%;
+    max-width: 88rem;
     margin: 0 auto;
-    padding: 1.6rem;
+    min-height: 100%;
   }
 
-  .settings__tabs {
+  /* ── Sidebar de abas ── */
+  .settings__side {
     display: flex;
-    flex-wrap: wrap;
-    gap: 0.8rem;
+    flex-direction: column;
+    gap: 2px;
+    width: 18rem;
+    flex-shrink: 0;
+    padding: 1.2rem 0.8rem;
+    border-right: 0.1rem solid var(--rim);
   }
 
-  .settings__tab {
+  .settings__side-label {
+    padding: 0.8rem 1rem 0.4rem;
+    font-size: 1.1rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-t);
+  }
+
+  .stab {
     font: inherit;
-    font-size: 1.2rem;
-    padding: 0.6rem 1rem;
-    color: var(--surface-content);
-    background: var(--surface-fill);
-    border: 0.1rem solid var(--surface-border);
-    border-radius: 2rem;
+    font-size: 1.3rem;
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    width: 100%;
+    padding: 0.7rem 1rem;
+    text-align: left;
+    color: var(--text-s);
+    background: transparent;
+    border: none;
+    border-radius: 0.7rem;
     cursor: pointer;
+    transition:
+      background 0.1s,
+      color 0.1s;
+  }
+
+  .stab:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-p);
+  }
+
+  .stab.on {
+    background: var(--iris-dim);
+    color: var(--text-p);
+    font-weight: 500;
+  }
+
+  .stab:focus-visible {
+    outline: 2px solid var(--iris);
+  }
+
+  /* ── Corpo ── */
+  .settings__body {
+    flex: 1;
+    min-width: 0;
+    overflow-y: auto;
+    padding: 2rem;
   }
 
   .settings__panel {
     display: flex;
     flex-direction: column;
-    gap: 1.2rem;
-    padding: 1.6rem;
-    color: var(--surface-content);
-    background: var(--surface-fill);
-    border: 0.1rem solid var(--surface-border);
-    border-radius: 1.2rem;
-    box-shadow: var(--surface-shadow);
-    backdrop-filter: blur(var(--surface-blur));
-    -webkit-backdrop-filter: blur(var(--surface-blur));
+    gap: 1.6rem;
   }
 
+  .settings__title {
+    margin: 0;
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: var(--text-p);
+  }
+
+  /* ── Filtros (cpills) ── */
   .settings__filter {
     display: flex;
-    gap: 0.8rem;
+    flex-wrap: wrap;
+    gap: 6px;
   }
 
-  .settings__filter button,
-  .settings__provider-save,
-  .settings__shortcut-change,
-  .settings__shortcut-reset,
-  .settings__grant,
-  .settings__help-action {
+  .cpill {
     font: inherit;
-    padding: 0.8rem 1.4rem;
-    color: var(--surface-content);
-    background: var(--surface-fill);
-    border: 0.1rem solid var(--surface-border);
-    border-radius: 1.2rem;
+    font-size: 1.2rem;
+    font-weight: 500;
+    padding: 4px 1.2rem;
+    border-radius: 2rem;
+    color: var(--text-s);
+    background: rgba(255, 255, 255, 0.05);
+    border: 0.1rem solid var(--rim);
     cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.12s;
   }
 
-  .settings__provider,
+  .cpill:hover {
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  .cpill.on {
+    background: var(--iris-dim);
+    border-color: rgba(90, 87, 232, 0.35);
+    color: var(--text-p);
+  }
+
+  /* ── Cards de provedor ── */
+  .pcard {
+    display: flex;
+    flex-direction: column;
+    gap: 1.2rem;
+    padding: 1.6rem;
+    background: var(--elevated);
+    border: 0.1rem solid var(--rim);
+    border-radius: 1rem;
+  }
+
+  .phdr {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .plogo {
+    width: 3.2rem;
+    height: 3.2rem;
+    border-radius: 0.8rem;
+    background: rgba(255, 255, 255, 0.06);
+    border: 0.1rem solid var(--rim);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--text-s);
+    flex-shrink: 0;
+  }
+
+  .pmeta {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .pname {
+    font-size: 1.3rem;
+    font-weight: 600;
+    color: var(--text-p);
+  }
+
+  .pmode {
+    font-size: 1.1rem;
+    color: var(--text-t);
+  }
+
+  .pbadge {
+    margin-left: auto;
+    font-size: 1.1rem;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 5px;
+    color: var(--text-t);
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  .pbadge--ok {
+    color: var(--green);
+    background: rgba(48, 209, 88, 0.12);
+  }
+
+  .key-input {
+    font-family: 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 1.2rem;
+    letter-spacing: 0.04em;
+    padding: 0.7rem 1.2rem;
+    color: var(--text-s);
+    background: rgba(255, 255, 255, 0.04);
+    border: 0.1rem solid var(--rim);
+    border-radius: 0.7rem;
+    outline: none;
+  }
+
+  .key-input::placeholder {
+    font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+    letter-spacing: normal;
+    color: var(--text-t);
+  }
+
+  .key-input:focus {
+    border-color: var(--iris);
+  }
+
+  .key-row {
+    display: flex;
+    gap: 0.8rem;
+    align-items: center;
+  }
+
+  /* ── Botões compartilhados do painel ── */
+  .btn {
+    font: inherit;
+    font-size: 1.1rem;
+    font-weight: 500;
+    padding: 5px 1.2rem;
+    border-radius: 6px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition:
+      opacity 0.12s,
+      background 0.12s;
+  }
+
+  .btn--primary {
+    color: #fff;
+    background: var(--iris);
+    border: 0.1rem solid rgba(255, 255, 255, 0.1);
+  }
+
+  .btn--primary:hover {
+    opacity: 0.88;
+  }
+
+  .btn:disabled {
+    cursor: default;
+    opacity: 0.55;
+  }
+
+  .btn--danger {
+    color: var(--error);
+    background: transparent;
+    border: 0.1rem solid var(--rim);
+  }
+
+  .btn--danger:hover:not(:disabled) {
+    background: rgba(255, 82, 82, 0.12);
+    border-color: rgba(255, 82, 82, 0.3);
+  }
+
+  /* ── Painéis genéricos (Modelos, Permissões, Recursos, Atalhos, Ajuda) ── */
   .settings__function,
   .settings__shortcut,
   .settings__permission,
@@ -730,32 +1195,38 @@
     flex-direction: column;
     gap: 0.8rem;
     padding: 1.2rem;
-    background: var(--surface-fill);
-    border: 0.1rem solid var(--surface-border);
-    border-radius: 1.2rem;
-    backdrop-filter: blur(var(--surface-blur));
-    -webkit-backdrop-filter: blur(var(--surface-blur));
+    background: var(--elevated);
+    border: 0.1rem solid var(--rim);
+    border-radius: 1rem;
   }
 
-  .settings__provider-title,
   .settings__function-title,
   .settings__help-title {
-    font-size: 1.6rem;
+    font-size: 1.3rem;
+    font-weight: 600;
     margin: 0;
+    color: var(--text-p);
   }
 
-  .settings__provider-status,
   .settings__function-empty,
   .settings__function-local,
   .settings__guidance,
   .settings__shortcut-error,
   .settings__about {
     margin: 0;
-    font-size: 1.3rem;
+    font-size: 1.2rem;
+    color: var(--text-s);
   }
 
-  .settings__shortcut-error {
-    color: #8a1f1f;
+  .settings__function-provider,
+  .settings__function-model {
+    font: inherit;
+    font-size: 1.2rem;
+    padding: 0.6rem 1rem;
+    color: var(--text-p);
+    background: rgba(255, 255, 255, 0.04);
+    border: 0.1rem solid var(--rim);
+    border-radius: 0.7rem;
   }
 
   .settings__shortcut {
@@ -766,13 +1237,51 @@
 
   .settings__shortcut-label {
     flex: 1 1 20rem;
+    font-size: 1.3rem;
+    color: var(--text-p);
   }
 
   .settings__shortcut-combo {
     font-size: 1.2rem;
     padding: 0.4rem 0.8rem;
-    border: 0.1rem solid var(--surface-border);
+    color: var(--text-s);
+    border: 0.1rem solid var(--rim);
     border-radius: 0.6rem;
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .settings__shortcut-change,
+  .settings__shortcut-reset,
+  .settings__grant,
+  .settings__help-action {
+    font: inherit;
+    font-size: 1.1rem;
+    font-weight: 500;
+    padding: 5px 1.2rem;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--text-s);
+    background: rgba(255, 255, 255, 0.06);
+    border: 0.1rem solid var(--rim);
+    transition:
+      background 0.12s,
+      color 0.12s;
+  }
+
+  .settings__shortcut-change:hover,
+  .settings__shortcut-reset:hover,
+  .settings__grant:hover,
+  .settings__help-action:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-p);
+  }
+
+  .settings__shortcut-error {
+    color: var(--error);
+  }
+
+  .settings__shortcut[data-shortcut-recording='true'] {
+    border-color: rgba(90, 87, 232, 0.35);
   }
 
   .settings__permission {
@@ -782,11 +1291,15 @@
   }
 
   .settings__permission-name {
+    font-size: 1.3rem;
     font-weight: 600;
+    color: var(--text-p);
   }
 
   .settings__permission-function {
     text-align: right;
+    font-size: 1.2rem;
+    color: var(--text-t);
   }
 
   .settings__feature,
@@ -794,10 +1307,18 @@
     flex-direction: row;
     align-items: center;
     gap: 1rem;
+    font-size: 1.3rem;
+    color: var(--text-p);
   }
 
   .settings__help-link {
-    color: var(--surface-content);
+    font-size: 1.3rem;
+    color: var(--iris);
+    text-decoration: none;
+  }
+
+  .settings__help-link:hover {
+    text-decoration: underline;
   }
 
   .settings__help-action,

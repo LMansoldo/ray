@@ -15,7 +15,7 @@
     {:else}
       <ul class="memory-card__list">
         {#each memoryItems as item (item.id)}
-          <li>{item.text}</li>
+          <li class="memory-card__item">{item.text}</li>
         {/each}
       </ul>
     {/if}
@@ -25,7 +25,11 @@
 <style>
   .memory-card__title {
     margin: 0 0 0.8rem;
-    font-size: 1.6rem;
+    font-size: 1.1rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-t);
   }
 
   .memory-card__list {
@@ -34,11 +38,31 @@
     list-style: none;
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    gap: 0.6rem;
+  }
+
+  .memory-card__item {
+    display: flex;
+    gap: 0.6rem;
+    align-items: flex-start;
+    font-size: 1.1rem;
+    color: var(--text-s);
+    line-height: 1.45;
+  }
+
+  .memory-card__item::before {
+    content: '';
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--iris);
+    flex-shrink: 0;
+    margin-top: 5px;
   }
 
   .memory-card__empty {
     margin: 0;
-    opacity: 0.72;
+    font-size: 1.1rem;
+    color: var(--text-s);
   }
 </style>

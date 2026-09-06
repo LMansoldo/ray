@@ -1,23 +1,34 @@
-import { describe, it, expect, afterEach } from 'vitest'
-import { render, cleanup, fireEvent } from '@testing-library/svelte'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte'
 import Settings from './Settings.svelte'
 import { setSettingsStateFeed, resetSettingsStateFeed } from './settings-feed'
 import { onSettingsAction } from './settings-actions'
 import type { SettingsAction } from './settings-actions'
 import type { SettingsState } from './types'
 import { onOnboardingRestart } from '../onboarding/restart'
-import { DEFAULT_SHORTCUTS } from '../../../../../contracts/settings'
+import { getVersion } from '@tauri-apps/api/app'
+import { DEFAULT_FEATURE_TOGGLES, DEFAULT_SHORTCUTS } from '../../../../../contracts/settings'
 
 // Contrato T-406 / RF-1001..1004 — aba Ajuda:
-//   RF-1001 Sobre com versão do app (lida do feed; o comando core de versão
-//           ainda não existe — placeholder '0.0.0');
+//   RF-1001 Sobre com versão real do app: loadSettingsState hidrata via
+//           getVersion() do plugin app do Tauri (placeholder '0.0.0' só
+//           quando o plugin não responde e o feed não declara outra);
 //   RF-1002 Comunidade (Discord) e Suporte (documentação);
 //   RF-1003 Reiniciar Integração → reabre o onboarding via o canal real do
 //           T-405 (../onboarding/restart — decisions.md: "T-406 só precisará
 //           chamar o dispatch");
 //   RF-1004 Logs de depuração: Abrir pasta de logs / Copiar logs — as ações
-//           saem pela fronteira declarada (nenhum comando core existe;
-//           cobertura real é coverageMap).
+//           saem pela fronteira declarada (cobertura real é coverageMap).
+
+const { emitMock } = vi.hoisted(() => ({
+  emitMock: vi.fn<(event: string, payload?: unknown) => Promise<void>>().mockResolvedValue(undefined),
+}))
+
+vi.mock('@tauri-apps/api/event', () => ({
+  emit: emitMock,
+  listen: vi.fn().mockResolvedValue(() => {}),
+}))
+vi.mock('@tauri-apps/api/app', () => ({ getVersion: vi.fn().mockResolvedValue('1.2.3') }))
 
 function baseState(overrides: Partial<SettingsState> = {}): SettingsState {
   return {
@@ -41,6 +52,7 @@ function baseState(overrides: Partial<SettingsState> = {}): SettingsState {
     },
     appVersion: '0.0.0',
     shortcuts: DEFAULT_SHORTCUTS,
+    features: { ...DEFAULT_FEATURE_TOGGLES },
     ...overrides,
   }
 }
@@ -56,24 +68,32 @@ async function openTab(container: HTMLElement, tab: string): Promise<void> {
 afterEach(() => {
   cleanup()
   resetSettingsStateFeed()
+  emitMock.mockClear()
+  window.localStorage.removeItem?.('ray_models')
+  window.localStorage.removeItem?.('ray_audio_meters')
 })
 
 describe('Ajuda — Sobre (RF-1001)', () => {
-  it('exibe a seção Sobre com a versão do feed', async () => {
+  it('exibe a seção Sobre com a versão real hidratada de getVersion()', async () => {
     const { container } = render(Settings)
     await openTab(container, 'help')
 
     const panel = container.querySelector('[data-settings-panel="help"]')
     expect(panel?.textContent).toContain('Sobre')
-    expect(container.querySelector('[data-about-version]')?.textContent).toContain('0.0.0')
+    await waitFor(() => {
+      expect(container.querySelector('[data-about-version]')?.textContent).toContain('1.2.3')
+    })
   })
 
-  it('mostra a versão declarada pelo feed quando disponível', async () => {
+  it('mantém a versão declarada pelo feed quando o plugin não responde', async () => {
+    vi.mocked(getVersion).mockRejectedValueOnce(new Error('fora do Tauri'))
     setSettingsStateFeed(() => baseState({ appVersion: '2.1.3' }))
     const { container } = render(Settings)
     await openTab(container, 'help')
 
-    expect(container.querySelector('[data-about-version]')?.textContent).toContain('2.1.3')
+    await waitFor(() => {
+      expect(container.querySelector('[data-about-version]')?.textContent).toContain('2.1.3')
+    })
   })
 })
 

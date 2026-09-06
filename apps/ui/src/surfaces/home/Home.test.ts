@@ -4,12 +4,12 @@ import Home from './Home.svelte'
 import { onHomeNavigate, type HomeDestination } from './navigation'
 import type { HomeProps } from './types'
 
-// Contrato T-402 / RF-011: tela principal com busca de sessões, badge de
-// plano, acesso a configurações, card do assistente atual, card de memória
-// em tempo real, free tier, ações de conversa e sessões recentes.
-// RF-802: busca de sessões passadas + lista de recentes.
-// RF-901/902: contador de sessões grátis + trial de 7 dias iniciável pela Home.
-// RF-903: badge de plano. RF-339: card de memória.
+// Contrato T-402 / RF-011: tela principal com busca de sessões, acesso a
+// configurações, card do assistente atual, card de memória em tempo real,
+// ações de conversa e sessões recentes. O uso completo é o default — não
+// existe conceito de plano/free tier/trial na superfície.
+// RF-802: busca de sessões passadas + lista de recentes. RF-339: card de
+// memória.
 //
 // As sessões chegam por props no seam do invoke(): o comando de listagem de
 // sessões ainda NÃO existe no core (core/src/lib.rs registra apenas
@@ -39,9 +39,6 @@ const baseProps: Props = {
     { id: 'sess-2', title: '1:1 com Ana' },
     { id: 'sess-3', title: 'Daily standup' },
   ],
-  planName: 'Gratuito',
-  freeSessionsUsed: 0,
-  freeSessionsTotal: 5,
   assistant: { name: 'Copiloto de Reuniões', category: 'MEETINGS' },
   memoryItems: [{ id: 'm1', text: 'Você perguntou sobre o roadmap ontem' }],
   sessionId: 'sess-1',
@@ -72,13 +69,6 @@ describe('Home — elementos da tela principal (RF-011)', () => {
     expect(container.querySelector('[data-home-search]')).not.toBeNull()
   })
 
-  it('renderiza o badge de plano (RF-903)', () => {
-    const { container } = render(Home, { props: baseProps })
-    const badge = container.querySelector('[data-plan-badge]')
-    expect(badge, 'o badge de plano deve existir').not.toBeNull()
-    expect(badge?.textContent).toContain('Gratuito')
-  })
-
   it('renderiza o card do assistente atual (RF-011)', () => {
     const { container, getByText } = render(Home, { props: baseProps })
     expect(container.querySelector('[data-assistant-card]')).not.toBeNull()
@@ -104,24 +94,6 @@ describe('Home — elementos da tela principal (RF-011)', () => {
   it('o card de memória vazio mostra um estado próprio', () => {
     const { getByText } = render(Home, { props: { ...baseProps, memoryItems: [] } })
     expect(getByText('Nenhuma memória recente')).toBeDefined()
-  })
-
-  it('renderiza o free tier com o contador de sessões grátis (RF-901)', () => {
-    const { container, getByText } = render(Home, { props: baseProps })
-    expect(container.querySelector('[data-tier-card]')).not.toBeNull()
-    expect(getByText('0 de 5 usadas')).toBeDefined()
-  })
-
-  it('o contador de sessões grátis reflete o uso informado (RF-901)', () => {
-    const { getByText } = render(Home, {
-      props: { ...baseProps, freeSessionsUsed: 2 },
-    })
-    expect(getByText('2 de 5 usadas')).toBeDefined()
-  })
-
-  it('oferece o trial de 7 dias iniciável pela Home (RF-902)', () => {
-    const { getByRole } = render(Home, { props: baseProps })
-    expect(getByRole('button', { name: 'Iniciar teste de 7 dias' })).toBeDefined()
   })
 
   it('compõe as três ações de conversa (RF-333)', () => {
@@ -157,6 +129,37 @@ describe('Home — sessões recentes e busca (RF-011 / RF-802)', () => {
     expect(section?.textContent).toContain('Reunião de planejamento')
     expect(section?.textContent).toContain('1:1 com Ana')
     expect(section?.textContent).toContain('Daily standup')
+  })
+
+  it('abre o detalhe da sessão ao clicar na linha (RF-802)', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'get_session') {
+        return Promise.resolve({
+          id: 'sess-1',
+          assistantName: 'Copiloto de Reuniões',
+          startedAt: '2026-09-01T12:00:00.000Z',
+          transcript: [
+            { speaker: 'SELF', text: 'bom dia', startMs: 0 },
+            { speaker: 'OTHERS', text: 'hello there', startMs: 1500 },
+          ],
+        })
+      }
+      return Promise.resolve(undefined)
+    })
+    const { container, getByText } = render(Home, { props: baseProps })
+    const row = container.querySelector('[data-recent-session="sess-2"]')
+    expect(row, 'linha clicável da sessão').not.toBeNull()
+    await fireEvent.click(row as HTMLElement)
+
+    expect(invokeMock).toHaveBeenCalledWith('get_session', { sessionId: 'sess-2' })
+    expect(container.querySelector('[data-session-detail]')).not.toBeNull()
+    expect(getByText('bom dia')).toBeDefined()
+    expect(getByText('hello there')).toBeDefined()
+
+    // Voltar fecha o detalhe e devolve a lista.
+    await fireEvent.click(container.querySelector('[data-session-detail-back]') as HTMLElement)
+    expect(container.querySelector('[data-session-detail]')).toBeNull()
+    expect(container.querySelector('[data-recent-sessions]')).not.toBeNull()
   })
 
   it('a busca filtra a lista de sessões, sem diferenciar maiúsculas', async () => {

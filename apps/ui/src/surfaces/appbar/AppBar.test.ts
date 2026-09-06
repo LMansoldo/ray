@@ -82,58 +82,64 @@ describe('AppBar — elementos da barra flutuante (RF-010)', () => {
     expect(nav?.hasAttribute('data-tauri-drag-region')).toBe(true)
   })
 
-  it('comeca com stealth inativo e sem aviso', () => {
+  it('comeca com stealth ativo e o aviso RF-508 visivel', () => {
     const { container } = render(AppBar, { props: baseProps })
-    expect(statusIndicator(container).textContent).toContain('Stealth inativo')
-    expect(stealthNotice(container)).toBeNull()
+    expect(statusIndicator(container).textContent).toContain('Stealth ativo')
+    expect(stealthNotice(container)).not.toBeNull()
+    expect(invokeMock).not.toHaveBeenCalled()
   })
 })
 
 describe('AppBar — stealth alterna visivelmente (RF-502)', () => {
-  it('clique ativa: set_stealth com excluded=true e indicador muda', async () => {
+  it('clique desativa: set_stealth com excluded=false e aviso some', async () => {
     const { container, getByRole } = render(AppBar, { props: baseProps })
     await fireEvent.click(getByRole('button', { name: /stealth/i }))
 
     expect(invokeMock).toHaveBeenCalledTimes(1)
-    expect(invokeMock.mock.calls[0]).toEqual(['set_stealth', { windowLabel: 'main', excluded: true }])
-    expect(statusIndicator(container).textContent).toContain('Stealth ativo')
+    expect(invokeMock.mock.calls[0]).toEqual(['set_stealth', { windowLabel: 'main', excluded: false }])
+    expect(statusIndicator(container).textContent).toContain('Stealth inativo')
+    expect(stealthNotice(container)).toBeNull()
   })
 
-  it('ativar exibe aviso RF-508 (SRS §7)', async () => {
+  it('reativar exibe aviso RF-508 (SRS §7)', async () => {
     const { container, getByRole } = render(AppBar, { props: baseProps })
-    await fireEvent.click(getByRole('button', { name: /stealth/i }))
+    const botao = getByRole('button', { name: /stealth/i })
+    await fireEvent.click(botao)
+    await fireEvent.click(botao)
 
     const aviso = stealthNotice(container)
     expect(aviso).not.toBeNull()
     for (const fragment of NOTICE_FRAGMENTS) {
       expect(aviso?.textContent).toMatch(fragment)
     }
+    expect(invokeMock.mock.calls[0]).toEqual(['set_stealth', { windowLabel: 'main', excluded: false }])
+    expect(invokeMock.mock.calls[1]).toEqual(['set_stealth', { windowLabel: 'main', excluded: true }])
   })
 
-  it('segundo clique desativa: set_stealth com excluded=false e aviso some', async () => {
+  it('segundo clique reativa: set_stealth com excluded=true e indicador muda', async () => {
     const { container, getByRole } = render(AppBar, { props: baseProps })
     const botao = getByRole('button', { name: /stealth/i })
     await fireEvent.click(botao)
     await fireEvent.click(botao)
 
     expect(invokeMock).toHaveBeenCalledTimes(2)
-    expect(invokeMock.mock.calls[0]).toEqual(['set_stealth', { windowLabel: 'main', excluded: true }])
-    expect(invokeMock.mock.calls[1]).toEqual(['set_stealth', { windowLabel: 'main', excluded: false }])
-    expect(statusIndicator(container).textContent).toContain('Stealth inativo')
-    expect(stealthNotice(container)).toBeNull()
-  })
-
-  it('monta ja ativo quando stealthExcluded=true, sem re-disparar o comando', async () => {
-    const { container, getByRole } = render(AppBar, {
-      props: { ...baseProps, stealthExcluded: true },
-    })
-
+    expect(invokeMock.mock.calls[0]).toEqual(['set_stealth', { windowLabel: 'main', excluded: false }])
+    expect(invokeMock.mock.calls[1]).toEqual(['set_stealth', { windowLabel: 'main', excluded: true }])
     expect(statusIndicator(container).textContent).toContain('Stealth ativo')
     expect(stealthNotice(container)).not.toBeNull()
+  })
+
+  it('monta inativo quando stealthExcluded=false, sem re-disparar o comando', async () => {
+    const { container, getByRole } = render(AppBar, {
+      props: { ...baseProps, stealthExcluded: false },
+    })
+
+    expect(statusIndicator(container).textContent).toContain('Stealth inativo')
+    expect(stealthNotice(container)).toBeNull()
     expect(invokeMock).not.toHaveBeenCalled()
 
     await fireEvent.click(getByRole('button', { name: /stealth/i }))
-    expect(invokeMock.mock.calls[0]).toEqual(['set_stealth', { windowLabel: 'main', excluded: false }])
+    expect(invokeMock.mock.calls[0]).toEqual(['set_stealth', { windowLabel: 'main', excluded: true }])
   })
 })
 
@@ -185,7 +191,7 @@ describe('AppBar — navegacao cross-window (RF-010)', () => {
 
     expect(invokeMock.mock.calls[0]).toEqual([
       'set_stealth',
-      { windowLabel: 'outra-janela', excluded: true },
+      { windowLabel: 'outra-janela', excluded: false },
     ])
     invokeMock.mockClear()
 

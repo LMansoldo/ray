@@ -34,7 +34,7 @@ export type InjectedCredential = {
 
 export type HealthResponse = { status: "ok"; version: string; dbReady: boolean };
 
-export type ValidateCredentialRequest = { credential: InjectedCredential };
+export type ValidateCredentialRequest = { credential: InjectedCredential; slot?: string };
 export type ValidateCredentialResponse = {
   valid: boolean;
   availableModels?: string[];
@@ -116,6 +116,40 @@ export type TranslateRequest = {
   credential: InjectedCredential;
 };
 export type TranslateResponse = { translatedText: string };
+
+// ── Persistência de credenciais (T-302/T-406) ─────────────────────────────
+
+export type SaveCredentialRequest = {
+  slot: string;
+  kind: ProviderKind;
+  connectionMode: ProviderConnectionMode;
+  label: string;
+  secretRef: string;
+  baseUrl?: string;
+};
+
+export type SaveCredentialResponse = {
+  id: string;
+  secretRef: string;
+};
+
+export type DeleteCredentialRequest = {
+  slot: string;
+};
+
+export type CredentialSummary = {
+  id: string;
+  slot: string;
+  kind: ProviderKind;
+  connectionMode: ProviderConnectionMode;
+  secretRef: string;
+  baseUrl?: string;
+  lastValidatedAt?: string;
+};
+
+export type GetCredentialsResponse = {
+  credentials: CredentialSummary[];
+};
 
 /** Helper para montar erros de contrato de forma consistente. */
 export function ipcErr(

@@ -12,7 +12,8 @@ export type AppBarProps = {
   /**
    * Estado inicial da exclusão de captura (stealth). Não existe comando de
    * LEITURA de estado em core/src/lib.rs: quem monta a barra (App shell)
-   * informa o estado real ao montar. Padrão false (inativo).
+   * informa o estado real ao montar. Padrão true — o uso completo é o
+   * default e o app nasce fora da captura de tela.
    */
   stealthExcluded?: boolean
 }

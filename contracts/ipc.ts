@@ -67,6 +67,21 @@ export type CreateAssistantRequest = { userId: string, name: string, category: A
 export type CreateAssistantResponse = { assistantId: string, };
 
 /**
+ * Resumo de uma credencial sem o segredo. `secret_ref` é ponteiro opaco —
+ * sua presença não viola ADR-003.
+ */
+export type CredentialSummary = { id: string, slot: string, kind: ProviderKind, connectionMode: ProviderConnectionMode, secretRef: string, baseUrl?: string, 
+/**
+ * ISO-8601. None = nunca validada.
+ */
+lastValidatedAt?: string, };
+
+/**
+ * Payload de DELETE /credentials.
+ */
+export type DeleteCredentialRequest = { slot: string, };
+
+/**
  * POST /sessions/end.
  */
 export type EndSessionRequest = { sessionId: string, 
@@ -77,6 +92,11 @@ export type EndSessionRequest = { sessionId: string,
 generateSummary: boolean, credential?: InjectedCredential, };
 
 export type EndSessionResponse = { sessionId: string, summaryId?: string, };
+
+/**
+ * Resposta de GET /credentials.
+ */
+export type GetCredentialsResponse = { credentials: Array<CredentialSummary>, };
 
 /**
  * GET /health — o Rust confirma que o sidecar subiu e está pronto.
@@ -108,6 +128,18 @@ export type MeetingPlatform = "ZOOM" | "GOOGLE_MEET" | "MICROSOFT_TEAMS" | "HANG
 export type ProviderConnectionMode = "API_KEY" | "SUBSCRIPTION" | "AGGREGATOR" | "COMPATIBLE_ENDPOINT";
 
 export type ProviderKind = "OPENAI" | "ANTHROPIC" | "GEMINI" | "DEEPSEEK" | "OPENROUTER" | "GENERIC";
+
+/**
+ * Payload de POST /credentials (core → sidecar).
+ * O segredo NUNCA aparece aqui — apenas o secretRef opaco (ADR-003).
+ */
+export type SaveCredentialRequest = { slot: string, kind: ProviderKind, connectionMode: ProviderConnectionMode, label: string, 
+/**
+ * Ponteiro opaco do cofre — não é o segredo (ADR-003).
+ */
+secretRef: string, baseUrl?: string, };
+
+export type SaveCredentialResponse = { id: string, secretRef: string, };
 
 export type Speaker = "SELF" | "OTHERS";
 
@@ -146,7 +178,12 @@ export type TranslateResponse = { translatedText: string, };
 /**
  * POST /providers/validate — testa uma credencial antes de salvar.
  */
-export type ValidateCredentialRequest = { credential: InjectedCredential, };
+export type ValidateCredentialRequest = { credential: InjectedCredential, 
+/**
+ * Slot de provedor na UI (opcional). Quando presente, o sidecar atualiza
+ * `lastValidatedAt` no banco após validação bem-sucedida (ADR-003).
+ */
+slot?: string, };
 
 export type ValidateCredentialResponse = { valid: boolean, availableModels?: Array<string>, reason?: string, };
 // END gerado por ts-rs
@@ -167,6 +204,9 @@ export type IpcEndpoints = {
   "POST /sessions/transcript": { req: AppendTranscriptRequest; res: IpcResult<{ segmentId: string }> };
   "POST /sessions/end": { req: EndSessionRequest; res: IpcResult<EndSessionResponse> };
   "POST /translate": { req: TranslateRequest; res: IpcResult<TranslateResponse> };
+  "POST /credentials": { req: SaveCredentialRequest; res: IpcResult<SaveCredentialResponse> };
+  "DELETE /credentials": { req: DeleteCredentialRequest; res: IpcResult<{ deleted: boolean }> };
+  "GET /credentials": { req: void; res: IpcResult<GetCredentialsResponse> };
 };
 // END mantido à mão
 // ---------------------------------------------------------------------

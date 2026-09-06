@@ -1,9 +1,9 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, cleanup, fireEvent } from '@testing-library/svelte'
 import Settings from './Settings.svelte'
 import { setSettingsStateFeed, resetSettingsStateFeed } from './settings-feed'
 import type { SettingsState } from './types'
-import { DEFAULT_SHORTCUTS } from '../../../../../contracts/settings'
+import { DEFAULT_FEATURE_TOGGLES, DEFAULT_SHORTCUTS } from '../../../../../contracts/settings'
 
 // Contrato T-406 / RF-103, RF-104, RF-335 — aba Permissões: o mesmo
 // mapeamento permissão→função do onboarding (T-405), relido do feed desta
@@ -15,6 +15,16 @@ import { DEFAULT_SHORTCUTS } from '../../../../../contracts/settings'
 //                            (Windows/Linux, sem permissão de sistema)
 // RF-104: estado por permissão, CTA "Conceder permissões ausentes" quando
 // algo falta e orientação de reinício do app.
+//
+// '@tauri-apps/api/core' NÃO é mockado aqui: fora do Tauri todo invoke
+// rejeita e o feed injetado permanece a fonte autoritativa (a hidratação
+// real de get_permission_status é coberta em settings-feed.test.ts).
+
+vi.mock('@tauri-apps/api/event', () => ({
+  emit: vi.fn().mockResolvedValue(undefined),
+  listen: vi.fn().mockResolvedValue(() => {}),
+}))
+vi.mock('@tauri-apps/api/app', () => ({ getVersion: vi.fn().mockResolvedValue('1.2.3') }))
 
 function baseState(overrides: Partial<SettingsState> = {}): SettingsState {
   return {
@@ -38,6 +48,7 @@ function baseState(overrides: Partial<SettingsState> = {}): SettingsState {
     },
     appVersion: '0.0.0',
     shortcuts: DEFAULT_SHORTCUTS,
+    features: { ...DEFAULT_FEATURE_TOGGLES },
     ...overrides,
   }
 }
@@ -129,7 +140,7 @@ describe('Permissões — concessão e reinício (RF-104)', () => {
     }
   })
 
-  it('oferece "Conceder permissões ausentes" e orienta reinício só quando algo falta', async () => {
+  it('oferece "Conceder permissões ausentes" só quando algo falta', async () => {
     setSettingsStateFeed(() =>
       baseState({
         permissions: { ...baseState().permissions, accessibility: 'notGranted' },
@@ -138,10 +149,10 @@ describe('Permissões — concessão e reinício (RF-104)', () => {
     const first = render(Settings)
     await openTab(first.container, 'permissions')
 
-    expect(first.getByRole('button', { name: 'Conceder permissões ausentes' })).toBeDefined()
-    const guidance = first.container.querySelector('[data-settings-restart-guidance]')
-    expect(guidance, 'a orientação de reinício deve existir').not.toBeNull()
-    expect(guidance?.textContent).toMatch(/reinici/i)
+    const grant = first.getByRole('button', { name: 'Conceder permissões ausentes' })
+    expect(grant).toBeDefined()
+    // O CTA agora dispara as dialogs TCC via core (request_all_permissions).
+    expect(grant.getAttribute('data-settings-grant-missing')).toBe('')
 
     cleanup()
     setSettingsStateFeed(() => baseState())
@@ -149,6 +160,5 @@ describe('Permissões — concessão e reinício (RF-104)', () => {
     await openTab(second.container, 'permissions')
 
     expect(second.queryByRole('button', { name: 'Conceder permissões ausentes' })).toBeNull()
-    expect(second.container.querySelector('[data-settings-restart-guidance]')).toBeNull()
   })
 })

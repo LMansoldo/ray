@@ -1,13 +1,14 @@
 // Tipos da superfície Configurações (T-406, RF-301..1004). O estado real
-// (status dos provedores, config por função, permissões, atalhos, versão do
-// app) chega por um adaptador local injetável (settings-feed.ts): o comando
-// core que forneceria esse estado ainda não existe — core/src/lib.rs registra
-// apenas set_stealth/toggle_window/suggest/transcribe_pending_pcm.
+// (status dos provedores, permissões, atalhos, features, versão do app)
+// chega pelo adaptador local injetável (settings-feed.ts), que hidrata dos
+// comandos core registrados (core/src/lib.rs: get_provider_statuses,
+// get_permission_status, get_shortcuts, get_app_settings) — cada falha
+// individual cai de volta na base restritiva.
 //
 // Os campos de domínio reusam os tipos do contrato (contracts/settings.ts,
 // contracts/ipc.ts) e do onboarding (T-405, DRY) — nunca são redefinidos aqui.
 import type { AiFunction, ProviderKind } from '../../../../../contracts/ipc'
-import type { ShortcutMap } from '../../../../../contracts/settings'
+import type { FeatureToggles, ShortcutMap } from '../../../../../contracts/settings'
 import type {
   OnboardingPermissionId,
   OnboardingPermissionState,
@@ -45,7 +46,7 @@ export type ProviderSlotId =
  * precisa ser distinguível do "configurado e falhou" (decisão registrada no
  * RED — ver decisions.md).
  */
-export type ProviderConnectionStatus = 'connected' | 'disconnected' | 'notConfigured'
+export type ProviderConnectionStatus = 'connected' | 'saved' | 'disconnected' | 'notConfigured'
 
 /** Configuração ativa de uma função (RF-404): provedor + modelo. */
 export interface SettingsFunctionConfig {
@@ -62,4 +63,6 @@ export interface SettingsState {
   permissions: Record<OnboardingPermissionId, OnboardingPermissionState>
   appVersion: string
   shortcuts: ShortcutMap
+  /** Toggles de recursos (RF-700) — hidratados de get_app_settings. */
+  features: FeatureToggles
 }

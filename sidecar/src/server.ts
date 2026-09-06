@@ -9,12 +9,21 @@ import {
   suggestStream,
   analyze,
   createAssistant,
+  listAssistants,
   startSession,
   appendTranscript,
   endSession,
   translate,
+  saveCredential,
+  deleteCredential,
+  getCredentials,
+  getSettings,
+  saveSettings,
+  listSessions,
+  getSessionDetail,
 } from "./handlers.js";
 import type { HealthResponse } from "./contract.js";
+import { initDb, seedDefaults } from "./boot.js";
 
 const VERSION = "0.0.0";
 
@@ -45,8 +54,46 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
 
   // GET /health
   if (method === "GET" && url === "/health") {
-    const body: HealthResponse = { status: "ok", version: VERSION, dbReady: false };
+    const body: HealthResponse = { status: "ok", version: VERSION, dbReady };
     return sendJson(res, 200, body);
+  }
+
+  // GET /credentials — sem body
+  if (method === "GET" && url === "/credentials") {
+    const result = await getCredentials();
+    return sendJson(res, 200, result);
+  }
+
+  // GET /assistants — sem body
+  if (method === "GET" && url === "/assistants") {
+    const result = await listAssistants();
+    return sendJson(res, 200, result);
+  }
+
+  // GET /sessions — últimas sessões (RF-802)
+  if (method === "GET" && url === "/sessions") {
+    const result = await listSessions();
+    return sendJson(res, 200, result);
+  }
+
+  // GET /sessions/:id — detalhe com transcrição
+  const sessionMatch = url.match(/^\/sessions\/([^/]+)$/);
+  if (method === "GET" && sessionMatch) {
+    const result = await getSessionDetail({ sessionId: sessionMatch[1] });
+    return sendJson(res, 200, result);
+  }
+
+  // GET /settings — features + atalhos persistidos
+  if (method === "GET" && url === "/settings") {
+    const result = await getSettings();
+    return sendJson(res, 200, result);
+  }
+
+  // PUT /settings — valida e persiste features e/ou atalhos
+  if (method === "PUT" && url === "/settings") {
+    const reqBody = await readJson<Parameters<typeof saveSettings>[0]>(req);
+    const result = await saveSettings(reqBody);
+    return sendJson(res, 200, result);
   }
 
   // POST /copilot/suggest — streaming SSE
@@ -73,6 +120,8 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     "POST /sessions/transcript": appendTranscript,
     "POST /sessions/end": endSession,
     "POST /translate": translate,
+    "POST /credentials": saveCredential,
+    "DELETE /credentials": deleteCredential,
   };
 
   const key = `${method} ${url}`;
@@ -105,4 +154,32 @@ export function start(): void {
   });
 }
 
-start();
+// Boot: garante o schema SQLite antes de aceitar conexoes. O Rust so
+// considera o sidecar pronto apos ler RAY_SIDECAR_PORT do stdout — se o
+// init falhar, exit(1) e o supervisor reinicia com backoff (sidecar.rs).
+async function main(): Promise<void> {
+  await initDb();
+  await seedDefaults();
+  dbReady = true;
+  start();
+}
+
+/** Reflete o estado real do banco para o healthcheck (T-300). */
+let dbReady = false;
+
+// Watchdog: se o núcleo Ray morrer, o sidecar se encerra (sem órfãos).
+const parentPid = Number(process.env.RAY_PARENT_PID ?? "");
+if (parentPid > 0) {
+  const timer = setInterval(() => {
+    if (process.ppid !== parentPid) {
+      process.stderr.write("[sidecar] núcleo encerrou — saindo\n");
+      process.exit(0);
+    }
+  }, 2_000);
+  timer.unref();
+}
+
+main().catch((e) => {
+  process.stderr.write(`[sidecar] boot failed: ${(e as Error).message}\n`);
+  process.exit(1);
+});

@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, cleanup, fireEvent } from '@testing-library/svelte'
 import Settings from './Settings.svelte'
 import { resetSettingsStateFeed } from './settings-feed'
@@ -11,6 +11,12 @@ import { resetSettingsStateFeed } from './settings-feed'
 // As 7 abas (SRS seções 3–4): Fontes de IA (RF-401/402/403/406), Modelos
 // (RF-301/302/303/404), Áudio e Tela (RF-206), Permissões (RF-103/104/335),
 // Recursos (RF-700), Atalhos (RF-601/602/604), Ajuda (RF-1001..1004).
+
+vi.mock('@tauri-apps/api/event', () => ({
+  emit: vi.fn().mockResolvedValue(undefined),
+  listen: vi.fn().mockResolvedValue(() => {}),
+}))
+vi.mock('@tauri-apps/api/app', () => ({ getVersion: vi.fn().mockResolvedValue('1.2.3') }))
 
 const TAB_TITLES: Array<[string, string]> = [
   ['aiSources', 'Fontes de IA'],
@@ -37,6 +43,8 @@ async function openTab(container: HTMLElement, tab: string): Promise<void> {
 afterEach(() => {
   cleanup()
   resetSettingsStateFeed()
+  window.localStorage.removeItem?.('ray_models')
+  window.localStorage.removeItem?.('ray_audio_meters')
 })
 
 describe('Settings — estrutura de abas (backlog T-406)', () => {

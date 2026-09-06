@@ -35,11 +35,14 @@ function buildContextBlock(context: TranscriptContextSegment[]): string {
     .join("\n");
 }
 
+type GeminiPart = { text: string } | { inline_data: { mime_type: string; data: string } };
+
 function buildContents(
   system: string,
   context: TranscriptContextSegment[],
   userPrompt?: string,
-): Array<{ role: string; parts: Array<{ text: string }> }> {
+  screenshots?: string[],
+): Array<{ role: string; parts: Array<GeminiPart> }> {
   const contextBlock = buildContextBlock(context);
   let userContent = system;
   if (contextBlock.length > 0) {
@@ -48,7 +51,16 @@ function buildContents(
   if (userPrompt) {
     userContent += "\n\n" + userPrompt;
   }
-  return [{ role: "user", parts: [{ text: userContent }] }];
+  const parts: GeminiPart[] = [{ text: userContent }];
+  for (const shot of screenshots ?? []) {
+    const match = /^data:(image\/[a-zA-Z+]+);base64,(.+)$/.exec(shot);
+    if (match) {
+      parts.push({
+        inline_data: { mime_type: match[1], data: match[2] },
+      });
+    }
+  }
+  return [{ role: "user", parts }];
 }
 
 export class GeminiProvider implements AiProvider {
@@ -103,6 +115,7 @@ export class GeminiProvider implements AiProvider {
         params.system,
         params.context,
         params.userPrompt,
+        params.screenshots,
       ),
     };
 

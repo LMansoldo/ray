@@ -27,6 +27,20 @@ const { invokeMock } = vi.hoisted(() => ({
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }))
 
+// Seam do barramento Tauri (mesmo padrão do AppBar.test.ts): a seleção
+// (RF-337) emite ray:assistant-changed para o App/Home consumir — nunca
+// chamada real de IPC em teste.
+const { emitMock } = vi.hoisted(() => ({
+  emitMock: vi
+    .fn<(event: string, payload?: unknown) => Promise<void>>()
+    .mockResolvedValue(undefined),
+}))
+
+vi.mock('@tauri-apps/api/event', () => ({
+  emit: emitMock,
+  listen: vi.fn().mockResolvedValue(() => {}),
+}))
+
 const SAMPLE: AssistantView[] = [
   { id: 'a1', name: 'Generalista', category: 'GENERAL', prompt: 'Você é um assistente geral.' },
   { id: 'a2', name: 'Reuniões executivas', category: 'MEETINGS', prompt: 'Resuma decisões e ações.' },
@@ -120,6 +134,7 @@ afterEach(() => {
   cleanup()
   resetAssistantsStateFeed()
   invokeMock.mockClear()
+  emitMock.mockClear()
 })
 
 describe('biblioteca — renderização (RF-336)', () => {
@@ -368,6 +383,19 @@ describe('biblioteca — seleção de assistente (RF-337)', () => {
     expect(rowById(container, 'a1').getAttribute('data-assistant-active')).toBeNull()
     unsubscribe()
   })
+
+  it('clicar numa linha emite ray:assistant-changed no barramento Tauri (payload id/name/category)', async () => {
+    const { container } = renderLibrary(feedState({ activeAssistantId: 'a1' }))
+
+    await fireEvent.click(rowById(container, 'a2'))
+
+    expect(emitMock).toHaveBeenCalledTimes(1)
+    expect(emitMock).toHaveBeenCalledWith('ray:assistant-changed', {
+      id: 'a2',
+      name: 'Reuniões executivas',
+      category: 'MEETINGS',
+    })
+  })
 })
 
 describe('biblioteca — importação e criador (RF-336, RF-338)', () => {
@@ -382,6 +410,19 @@ describe('biblioteca — importação e criador (RF-336, RF-338)', () => {
     unsubscribe()
   })
 
+  it('o botão "Importar prompt" abre o seletor de arquivo nativo (.md/.txt/.markdown)', async () => {
+    const { container, getByRole } = renderLibrary(feedState())
+    const input = container.querySelector<HTMLInputElement>('[data-assistant-import-input]')
+    expect(input, 'o input de arquivo escondido deve existir').not.toBeNull()
+    expect(input!.accept).toBe('.md,.txt,.markdown,text/markdown,text/plain')
+    expect(input!.hidden).toBe(true)
+    const clickSpy = vi.spyOn(input!, 'click')
+
+    await fireEvent.click(getByRole('button', { name: /importar prompt/i }))
+
+    expect(clickSpy).toHaveBeenCalledTimes(1)
+  })
+
   it("'Novo assistente' abre o criador (a biblioteca sai de cena)", async () => {
     const { container, getByRole } = renderLibrary(feedState())
     expect(container.querySelector('[data-assistant-creator]')).toBeNull()
@@ -392,7 +433,7 @@ describe('biblioteca — importação e criador (RF-336, RF-338)', () => {
     expect(container.querySelector('[data-assistant-library]')).toBeNull()
   })
 
-  it('nenhum fluxo da biblioteca chama invoke() (não existem comandos core)', async () => {
+  it('fluxos da biblioteca só chamam os comandos core declarados', async () => {
     const { container, getByRole } = renderLibrary(feedState({ assistants: makeAssistants(13) }))
 
     await typeSearch(container, 'assistente')
@@ -402,6 +443,9 @@ describe('biblioteca — importação e criador (RF-336, RF-338)', () => {
     await fireEvent.click(getByRole('button', { name: /importar prompt/i }))
     await fireEvent.click(getByRole('button', { name: /novo assistente/i }))
 
-    expect(invokeMock).not.toHaveBeenCalled()
+    // Montagem carrega a biblioteca persistida; navegação/busca/seleção
+    // NUNCA inventam invoke (contrato: só os comandos registrados no core).
+    const commands = invokeMock.mock.calls.map((c) => c[0])
+    expect(new Set(commands)).toEqual(new Set(['list_assistants']))
   })
 })

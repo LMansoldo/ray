@@ -103,24 +103,36 @@ describe('ConversationActions — ações disparam o comando suggest (RF-333)', 
     expect(req.selectionText).toBeUndefined()
   })
 
-  it('"Capturar Tela" dispara invoke("suggest") com trigger SCREEN_CAPTURE e as capturas', async () => {
-    const screenshots = ['data:image/png;base64,AAAA']
+  it('"Capturar Tela" captura ao vivo (capture_screen) e envia o PNG com SCREEN_CAPTURE', async () => {
+    const live = 'data:image/png;base64,Q0FQVFVSQQ=='
+    invokeMock.mockImplementation((command: string) =>
+      command === 'capture_screen' ? Promise.resolve(live) : Promise.resolve(undefined),
+    )
+    const stale = ['data:image/png;base64,AAAA']
     const { getByRole } = render(ConversationActions, {
-      props: { ...baseProps, screenshots },
+      props: { ...baseProps, screenshots: stale },
     })
     await fireEvent.click(getByRole('button', { name: 'Capturar Tela' }))
 
-    expect(invokeMock).toHaveBeenCalledTimes(1)
+    // 1º invoke: capture_screen (captura ao vivo); 2º: suggest.
+    expect(invokeMock).toHaveBeenCalledTimes(2)
+    expect(invokeMock).toHaveBeenNthCalledWith(1, 'capture_screen')
     const req = lastSuggestPayload()
     expect(req.trigger).toBe('SCREEN_CAPTURE')
-    expect(req.screenshots).toEqual(screenshots)
+    // A captura ao vivo substitui o prop desatualizado.
+    expect(req.screenshots).toEqual([live])
     expect(req.userPrompt).toBeUndefined()
   })
 
-  it('"Capturar Tela" sem capturas disponíveis omite o campo screenshots', async () => {
+  it('"Capturar Tela" sem captura disponível cai para o prop e omite screenshots se vazio', async () => {
+    // capture_screen rejeita (ex.: Screen Recording negado) — fallback ao prop.
+    invokeMock.mockImplementation((command: string) =>
+      command === 'capture_screen' ? Promise.reject(new Error('denied')) : Promise.resolve(undefined),
+    )
     const { getByRole } = render(ConversationActions, { props: baseProps })
     await fireEvent.click(getByRole('button', { name: 'Capturar Tela' }))
 
+    expect(invokeMock).toHaveBeenCalledTimes(2)
     expect(lastSuggestPayload().screenshots).toBeUndefined()
   })
 
@@ -165,10 +177,11 @@ describe('ConversationActions — atalhos (RF-333)', () => {
     const hints = Array.from(container.querySelectorAll('kbd')).map(
       (element) => element.textContent?.trim() ?? '',
     )
-    // Valores provisórios: os atalhos globais reais são trabalho do core
-    // (core/src/shortcuts.rs), ainda não expostos como comando para a UI.
-    // A ordem segue a listagem do RF-333: Analisar, Capturar, Perguntar.
-    expect(hints).toEqual(['Cmd+Shift+A', 'Cmd+Shift+S', 'Cmd+Shift+P'])
+    // Dicas casam com os defaults registrados no SO (RF-604 /
+    // contracts/settings.ts): ⌘↩ = Perguntar/Enviar (analyze no core) e
+    // ⌘E = Capturar Tela. "Perguntar Algo" não tem atalho global — é ação
+    // de UI local (sem dica enganosa).
+    expect(hints).toEqual(['⌘↩', '⌘E'])
   })
 
   it('renderiza os três botões de ação', () => {

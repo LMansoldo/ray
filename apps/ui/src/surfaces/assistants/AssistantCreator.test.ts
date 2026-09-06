@@ -24,6 +24,19 @@ const { invokeMock } = vi.hoisted(() => ({
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }))
 
+// Seam do barramento Tauri (mesmo padrão do AppBar.test.ts): a seleção da
+// biblioteca emite ray:assistant-changed — nunca chamada real de IPC.
+const { emitMock } = vi.hoisted(() => ({
+  emitMock: vi
+    .fn<(event: string, payload?: unknown) => Promise<void>>()
+    .mockResolvedValue(undefined),
+}))
+
+vi.mock('@tauri-apps/api/event', () => ({
+  emit: emitMock,
+  listen: vi.fn().mockResolvedValue(() => {}),
+}))
+
 // Fixture do T-408 (MarkdownEditor.test.ts): o bloco de código precisa
 // sobreviver ao round-trip pelo modelo Milkdown sem corrupção, byte a byte
 // (a cerca de fechamento deixa UMA quebra de linha no conteúdo serializado —
@@ -78,6 +91,7 @@ async function selectCreatorCategory(container: HTMLElement, value: string): Pro
 afterEach(() => {
   cleanup()
   invokeMock.mockClear()
+  emitMock.mockClear()
 })
 
 describe('criador — contrato do formulário (RF-338, T-408)', () => {
@@ -192,7 +206,7 @@ describe('criador — round-trip do prompt pelo editor (RF-338, ADR-011)', () =>
     unsubscribe()
   })
 
-  it('nenhum fluxo do criador chama invoke() (não existem comandos core)', async () => {
+  it('criar assistente persiste via invoke("create_assistant") — único comando do fluxo', async () => {
     const { container, getByRole } = await openCreator()
 
     dispatchPromptImport(INITIAL)
@@ -202,10 +216,105 @@ describe('criador — round-trip do prompt pelo editor (RF-338, ADR-011)', () =>
       },
       { timeout: 5000 },
     )
+    invokeMock.mockImplementation((command: string) =>
+      command === 'create_assistant'
+        ? Promise.resolve({ assistantId: 'asst-novo' })
+        : Promise.resolve(undefined),
+    )
     await typeName(container, 'Novo resumo')
     await selectCreatorCategory(container, 'SALES')
     await fireEvent.click(getByRole('button', { name: /criar assistente/i }))
 
-    expect(invokeMock).not.toHaveBeenCalled()
+    const commands = invokeMock.mock.calls.map((c) => c[0])
+    expect(new Set(commands)).toEqual(new Set(['list_assistants', 'create_assistant']))
+    expect(invokeMock).toHaveBeenCalledWith('create_assistant', {
+      name: 'Novo resumo',
+      category: 'SALES',
+      prompt: expect.stringContaining('Intro'),
+    })
+  })
+})
+
+describe('criador — importação real de arquivo (.md/.txt, RF-336/338)', () => {
+  function importInput(container: HTMLElement): HTMLInputElement {
+    const input = container.querySelector<HTMLInputElement>('[data-assistant-import-input]')
+    if (!input) {
+      throw new Error('input de importação não encontrado')
+    }
+    return input
+  }
+
+  async function chooseFile(container: HTMLElement, file: File): Promise<void> {
+    await fireEvent.change(importInput(container), { target: { files: [file] } })
+  }
+
+  it('importar da biblioteca abre o criador, semeia o nome (sem extensão) e carrega o conteúdo no editor', async () => {
+    const { container } = render(Assistants)
+    expect(container.querySelector('[data-assistant-creator]')).toBeNull()
+
+    await chooseFile(
+      container,
+      new File(['# Prompt importado\n\nResuma a reunião.'], 'prompt.md', {
+        type: 'text/markdown',
+      }),
+    )
+
+    // A importação leva ao criador com o nome pré-preenchido.
+    expect(container.querySelector('[data-assistant-creator]')).not.toBeNull()
+    expect(container.querySelector('[data-assistant-library]')).toBeNull()
+    const nameInput = elementOrThrow(container, '[data-assistant-name-input]') as HTMLInputElement
+    expect(nameInput.value).toBe('prompt')
+
+    // O conteúdo do arquivo aterra no editor Milkdown como Markdown — o
+    // editor monta de forma assíncrona (Editor.make()), então a busca pelo
+    // nó precisa acontecer DENTRO do waitFor.
+    await waitFor(
+      () => {
+        expect(elementOrThrow(container, '.ProseMirror').textContent ?? '').toContain(
+          'Resuma a reunião.',
+        )
+      },
+      { timeout: 5000 },
+    )
+  })
+
+  it('importar com o criador já aberto preserva o nome digitado', async () => {
+    const { container } = await openCreator()
+    await typeName(container, 'Nome que importa')
+
+    await chooseFile(container, new File(['Conteúdo'], 'arquivo.txt', { type: 'text/plain' }))
+
+    const nameInput = elementOrThrow(container, '[data-assistant-name-input]') as HTMLInputElement
+    expect(nameInput.value).toBe('Nome que importa')
+    await waitFor(
+      () => {
+        expect(elementOrThrow(container, '.ProseMirror').textContent ?? '').toContain('Conteúdo')
+      },
+      { timeout: 5000 },
+    )
+  })
+
+  it('o prompt importado por arquivo cruza a criação como Markdown fiel', async () => {
+    const received: AssistantAction[] = []
+    const unsubscribe = onAssistantAction((action: AssistantAction) => received.push(action))
+    const { container, getByRole } = render(Assistants)
+
+    await chooseFile(container, new File([INITIAL], 'resumo.md', { type: 'text/markdown' }))
+    await waitFor(
+      () => {
+        expect(elementOrThrow(container, '.ProseMirror').textContent ?? '').toContain('Intro')
+      },
+      { timeout: 5000 },
+    )
+    await fireEvent.click(getByRole('button', { name: /criar assistente/i }))
+
+    expect(received).toHaveLength(1)
+    const [action] = received
+    if (!action || action.type !== 'assistantCreate') {
+      throw new Error('ação inesperada: esperado assistantCreate')
+    }
+    expect(action.name).toBe('resumo')
+    expect(extractCodeBlock(action.prompt)).toBe(CODE + '\n')
+    unsubscribe()
   })
 })

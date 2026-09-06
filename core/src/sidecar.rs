@@ -34,7 +34,45 @@ pub(crate) fn parse_port_line(line: &str) -> Option<u16> {
 
 /// Sidecar binary name. Overridable via `RAY_SIDECAR_BIN` for tests.
 fn sidecar_binary() -> String {
-    std::env::var("RAY_SIDECAR_BIN").unwrap_or_else(|_| "ray-sidecar".into())
+    std::env::var("RAY_SIDECAR_BIN").unwrap_or_else(|_| resolve_sidecar_path().to_string_lossy().into())
+}
+
+/// Resolve o caminho do binário do sidecar.
+///
+/// Produção: o `externalBin` do Tauri copia o binário com sufixo de triple
+/// (`ray-sidecar-aarch64-apple-darwin`) para a pasta do executável principal
+/// (`Ray.app/Contents/MacOS/`). PATH lookup não funciona em apps GUI — resolve
+/// relativo a `current_exe()`. Dev: fallback para o nome nu no PATH
+/// (ou override via `RAY_SIDECAR_BIN`).
+fn resolve_sidecar_path() -> std::path::PathBuf {
+    // Triples suportados pelo bundle (docs/packaging.md). O suffixo é o
+    // target triple do host; mapeamos de std::env::consts.
+    let triple = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        ("windows", "x86_64") => "x86_64-pc-windows-msvc",
+        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
+        _ => "",
+    };
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+
+    if let Some(dir) = exe_dir {
+        if !triple.is_empty() {
+            let suffixed = dir.join(format!("ray-sidecar-{triple}"));
+            if suffixed.exists() {
+                return suffixed;
+            }
+        }
+        let plain = dir.join("ray-sidecar");
+        if plain.exists() {
+            return plain;
+        }
+    }
+    // Fallback: deixa o SO resolver via PATH (dev).
+    std::path::PathBuf::from("ray-sidecar")
 }
 
 /// Reads stdout lines until `RAY_SIDECAR_PORT=<n>` is found (ADR-005).
@@ -57,10 +95,19 @@ async fn read_sidecar_port<R: tokio::io::AsyncRead + Unpin>(
 }
 
 /// Spawns the sidecar binary and resolves its ephemeral port.
-async fn spawn_child() -> Result<(u16, Child), SidecarError> {
-    let mut child = Command::new(sidecar_binary())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+///
+/// `db_path`: caminho absoluto do banco SQLite no app data dir — repassado ao
+/// sidecar via `DATABASE_URL` (`file:<path>`). O sidecar é o único escritor.
+async fn spawn_child(db_path: &std::path::Path) -> Result<(u16, Child), SidecarError> {
+    let mut cmd = Command::new(sidecar_binary());
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::inherit()) // erros de boot do launcher/node aparecem no log do app
+        .env(
+            "DATABASE_URL",
+            format!("file:{}", db_path.to_string_lossy()),
+        )
+        .env("RAY_PARENT_PID", std::process::id().to_string());
+    let mut child = cmd
         .spawn()
         .map_err(|e| SidecarError::Spawn(e.to_string()))?;
     let stdout = child
@@ -73,24 +120,31 @@ async fn spawn_child() -> Result<(u16, Child), SidecarError> {
 
 /// Supervision loop (ADR-001 / RNF-302): owns the child, waits for exit,
 /// and respawns with a 1-second backoff — never blocks the UI windows.
-async fn supervise(mut child: Child) {
+/// Cada respawn recebe uma porta efêmera NOVA — re-registra no estado global
+/// (`set_sidecar_port`), senão o core continuaria chamando a porta morta.
+async fn supervise(mut child: Child, db_path: std::path::PathBuf) {
     const BACKOFF: Duration = Duration::from_secs(1);
     loop {
         let _ = child.wait().await;
         sleep(BACKOFF).await;
-        match spawn_child().await {
-            Ok((_port, new_child)) => child = new_child,
+        match spawn_child(&db_path).await {
+            Ok((port, new_child)) => {
+                crate::set_sidecar_port(port);
+                eprintln!("[ray] sidecar respawnado na porta {port}");
+                child = new_child;
+            }
             Err(_) => sleep(BACKOFF).await,
         }
     }
 }
 
 impl Sidecar {
-    /// Inicia o sidecar via externalBin, lê a porta efêmera do stdout e
-    /// lança a tarefa de supervisão em background (ADR-001/005).
-    pub async fn start() -> Result<Self, SidecarError> {
-        let (port, child) = spawn_child().await?;
-        tokio::spawn(supervise(child));
+    /// Inicia o sidecar, lê a porta efêmera do stdout e lança a tarefa de
+    /// supervisão em background (ADR-001/005). `db_path` é repassado ao
+    /// processo filho via `DATABASE_URL` (SQLite no app data dir).
+    pub async fn start(db_path: std::path::PathBuf) -> Result<Self, SidecarError> {
+        let (port, child) = spawn_child(&db_path).await?;
+        tokio::spawn(supervise(child, db_path));
         Ok(Sidecar { port })
     }
 

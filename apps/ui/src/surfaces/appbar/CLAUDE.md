@@ -8,7 +8,7 @@ surfaces. Fornece navegacao global e controle de stealth/ocultacao.
 | Prop | Tipo | Padrao | Descricao |
 |---|---|---|---|
 | `windowLabel` | `string` | `'main'` | Label da janela alvo do `set_stealth` apenas |
-| `stealthExcluded` | `boolean` | `false` | Estado inicial do stealth |
+| `stealthExcluded` | `boolean` | `true` | Estado inicial do stealth — ativo por padrao (uso completo e o default) |
 
 Nota: `windowLabel` controla APENAS o stealth. A navegacao sempre aponta
 para a janela `'main'`, independentemente do valor desta prop.

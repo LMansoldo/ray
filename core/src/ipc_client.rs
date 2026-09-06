@@ -73,11 +73,81 @@ pub trait SuggestEventEmitter: Send + 'static {
 /// ADR-005: transporte via SSE/chunked sobre loopback; Rust é o único cliente.
 pub async fn stream_suggest_events<E: SuggestEventEmitter>(
     base_url: &str,
-    req: SuggestRequest,
+    mut req: SuggestRequest,
     resolve: fn(&str) -> Result<String, String>,
     emitter: E,
 ) -> Result<(), IpcClientError> {
-    todo!("T-303: SSE streaming bridge not yet implemented")
+    // 1. Resolver o segredo a partir do secret_ref e injetar no corpo
+    //    (mesmo contrato do POST não-streaming — ADR-005).
+    let secret = resolve(&req.credential.secret).map_err(IpcClientError::Credential)?;
+    req.credential.secret = secret;
+
+    // 2. POST ao sidecar com resposta SSE chunked.
+    let url = format!("{}/copilot/suggest", base_url);
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&url)
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| IpcClientError::Http(e.to_string()))?;
+
+    if response.status().is_server_error() {
+        return Err(IpcClientError::Http(format!(
+            "sidecar returned {}",
+            response.status()
+        )));
+    }
+
+    // 3. Consome o stream: frames SSE separados por linha em branco; cada
+    //    linha útil é `data: <json>` de um SuggestStreamEvent. Emitido assim
+    //    que parseado — sem bufferização de eventos (RNF-102).
+    use futures_util::StreamExt;
+    let mut stream = response.bytes_stream();
+    let mut buffer: Vec<u8> = Vec::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| IpcClientError::Http(e.to_string()))?;
+        buffer.extend_from_slice(&chunk);
+
+        // Processa todos os frames completos presentes no buffer.
+        while let Some((frame_len, sep_len)) = find_frame(&buffer) {
+            let frame: Vec<u8> = buffer.drain(..frame_len).collect();
+            buffer.drain(..sep_len);
+
+            let text = String::from_utf8_lossy(&frame);
+            for line in text.lines() {
+                let Some(json) = line.strip_prefix("data: ") else {
+                    continue;
+                };
+                let json = json.trim();
+                if json.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<crate::ipc::SuggestStreamEvent>(json) {
+                    Ok(event) => emitter.emit_event(event),
+                    Err(e) => {
+                        return Err(IpcClientError::Http(format!("frame SSE inválido: {e}")))
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Localiza o próximo frame SSE completo: retorna (tamanho do frame, tamanho
+/// do separador). Frames terminam em `\n\n` ou `\r\n\r\n`.
+fn find_frame(buf: &[u8]) -> Option<(usize, usize)> {
+    for (i, w) in buf.windows(4).enumerate() {
+        if w == b"\r\n\r\n" {
+            return Some((i, 4));
+        }
+    }
+    buf.windows(2)
+        .position(|w| w == b"\n\n")
+        .map(|i| (i, 2))
 }
 
 #[cfg(test)]

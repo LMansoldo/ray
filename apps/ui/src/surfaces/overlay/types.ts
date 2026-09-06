@@ -11,9 +11,16 @@ export interface OverlayPosition {
 
 export interface OverlayProps {
   position?: OverlayPosition
+  meetingActive?: boolean
+  /** Aviso transitório do núcleo (driver ausente, atalho não registrado…) */
+  hint?: string
+  /** RF-701: acompanhar a resposta mais recente (toggle Recursos). */
+  autoScroll?: boolean
 }
 
 /** O card recebe o estado derivado do stream; 'idle' nunca chega a ele. */
 export interface InsightCardProps {
   state: SuggestionStreamState
+  /** RF-701: seguir o fim do conteúdo enquanto renderiza. */
+  autoScroll?: boolean
 }

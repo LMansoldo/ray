@@ -1,14 +1,22 @@
 <script lang="ts">
-  // Superfície Onboarding (T-405): fluxo ordenado de 6 passos (RF-101) —
-  // permissões, áudio, transcrição, análise, comunidade (opcional) e o trial
-  // de 7 dias (RF-902). A progressão é travada pelo estado real de cada passo
+  // Superfície Onboarding (T-405): fluxo ordenado de 5 passos —
+  // permissões, áudio, transcrição, análise e comunidade/ajuda (opcional,
+  // terminal). O uso completo é o default — não existe passo de trial.
+  // A progressão é travada pelo estado real de cada passo
   // (RF-103 / RF-104), relido do adaptador local state-feed.ts a cada clique
   // (o comando core que forneceria o estado ainda não existe). O reinício
   // (Ajuda → Reiniciar Integração, RF-102 / RF-1003) chega pelo canal local
   // restart.ts; o menu Ajuda em si pertence a T-406.
   import { glassTokens } from '../../lib/glass/tokens'
+  import { onMount } from 'svelte'
+  import { invoke } from '@tauri-apps/api/core'
   import { onOnboardingRestart } from './restart'
-  import { readOnboardingState } from './state-feed'
+  import {
+    loadOnboardingState,
+    readOnboardingState,
+    requestAllPermissions,
+    setOnboardingStateFeed,
+  } from './state-feed'
   import type {
     OnboardingPermissionId,
     OnboardingPlatform,
@@ -17,14 +25,13 @@
 
   let { oncomplete }: { oncomplete?: () => void } = $props()
 
-  /** Títulos dos 6 passos, na ordem exata do RF-101. */
+  /** Títulos dos 5 passos, na ordem do fluxo (comunidade opcional/terminal). */
   const STEP_TITLES = [
     'Verificação de permissões',
     'Configuração de áudio',
     'Transcrição',
     'Análise de texto e imagem',
     'Comunidade e ajuda',
-    'Trial de 7 dias',
   ] as const
 
   /**
@@ -60,6 +67,46 @@
 
   let currentStep = $state(1)
   let onboardingState = $state<OnboardingState>(readOnboardingState())
+  let requesting = $state(false)
+
+  // Status real de permissões do core (TCC) na entrada da superfície. O
+  // estado carregado também vira o feed ativo — advance() consulta o feed
+  // (injetável nos testes; core-carregado no app). Se o core não responder
+  // (testes jsdom), o feed injetado permanece intocado.
+  async function refreshFromCore(): Promise<void> {
+    const s = await loadOnboardingState()
+    if (s === null) return
+    setOnboardingStateFeed(() => s)
+    onboardingState = s
+  }
+
+  onMount(() => {
+    void refreshFromCore()
+  })
+
+  async function handleGrantMissing(): Promise<void> {
+    requesting = true
+    try {
+      const state = await requestAllPermissions()
+      if (state === null) return
+      onboardingState = state
+      setOnboardingStateFeed(() => state)
+      // Permissão negada não reapresenta dialog: abre os Ajustes do Sistema
+      // para a pendência restante (a recuperação é manual por natureza).
+      const pending = (['microphone', 'speechRecognition', 'screenRecording', 'accessibility'] as OnboardingPermissionId[]).find(
+        (id) => onboardingState.permissions[id] !== 'granted',
+      )
+      if (pending) {
+        await invoke('open_permission_settings', { kind: pending })
+      }
+    } finally {
+      requesting = false
+    }
+  }
+
+  async function handleRefresh(): Promise<void> {
+    await refreshFromCore()
+  }
 
   const rows = $derived.by(() => buildPermissionRows(onboardingState.platform))
 
@@ -92,7 +139,7 @@
     return onboardingState.analysisConfigured
   }
 
-  /** O avanço trava no primeiro passo incompleto; 5 é opcional, 6 é terminal. */
+  /** O avanço trava no primeiro passo incompleto; o passo 5 é opcional. */
   function canAdvanceFrom(step: number, state: OnboardingState): boolean {
     if (step === 1) {
       return step1CompleteFor(state)
@@ -110,6 +157,7 @@
   }
 
   function advance(): void {
+    // Consulta o feed ativo (injetável nos testes; core-carregado no app).
     const state = readOnboardingState()
     onboardingState = state
     if (!canAdvanceFrom(currentStep, state)) {
@@ -117,24 +165,22 @@
     }
     currentStep += 1
   }
-
-  function skipCommunity(): void {
-    onboardingState = readOnboardingState()
-    currentStep = 6
-  }
 </script>
 
 <main
   class="onboarding"
-  style:--surface-fill={glassTokens.color.surface}
-  style:--surface-border={glassTokens.color.border}
-  style:--surface-content={glassTokens.color.content}
-  style:--surface-shadow={glassTokens.shadow.background}
   style:--surface-blur={glassTokens.blur.surface}
 >
   <ol class="onboarding__steps">
-    {#each STEP_TITLES as title (title)}
-      <li class="onboarding__step-item" data-onboarding-step-item>{title}</li>
+    {#each STEP_TITLES as title, index (title)}
+      <li
+        class="onboarding__step-item"
+        class:on={currentStep === index + 1}
+        class:done={currentStep > index + 1}
+        data-onboarding-step-item
+      >
+        {title}
+      </li>
     {/each}
   </ol>
 
@@ -144,28 +190,49 @@
   <section class="onboarding__permissions">
     {#each rows as row (row.id)}
       <div
-        class="onboarding__permission"
+        class="prow"
+        class:prow--pending={onboardingState.permissions[row.id] === 'notGranted'}
         data-permission-row={row.id}
         data-permission-state={onboardingState.permissions[row.id]}
       >
-        <span class="onboarding__permission-name">{row.name}</span>
-        <span class="onboarding__permission-function">{row.function}</span>
+        <span class="pinfo">
+          <span class="pname">{row.name}</span>
+          <span class="pfunc">{row.function}</span>
+        </span>
+        <span
+          class="pstatus"
+          class:pstatus--ok={onboardingState.permissions[row.id] !== 'notGranted'}
+        >
+          {onboardingState.permissions[row.id] === 'notGranted' ? 'Pendente' : 'Concedido'}
+        </span>
       </div>
     {/each}
 
     {#if !step1Complete}
-      <!-- O comando core que abriria as preferências de sistema ainda não
-           existe; quando existir, este CTA passa a invocá-lo. -->
-      <button type="button" class="onboarding__grant" data-onboarding-grant-missing>
-        Conceder permissões ausentes
+      <!-- "Habilitar tudo": dispara as dialogs TCC (mic, fala, tela) via core
+           e abre os Ajustes do Sistema para o que continuar pendente. -->
+      <button
+        type="button"
+        class="ob-btn ob-btn--primary"
+        data-onboarding-grant-missing
+        disabled={requesting}
+        onclick={() => void handleGrantMissing()}
+      >
+        {requesting ? 'Solicitando…' : 'Habilitar tudo'}
       </button>
-      <p class="onboarding__guidance" data-onboarding-restart-guidance>
-        Conclua a configuração e reinicie o app para aplicar as permissões.
-      </p>
+      <button
+        type="button"
+        class="ob-btn"
+        data-onboarding-refresh-permissions
+        onclick={() => void handleRefresh()}
+      >
+        Atualizar status
+      </button>
     {/if}
   </section>
 
   <section class="onboarding__panel" data-onboarding-step={currentStep}>
+    <span class="ob-eyebrow">Passo {currentStep} de {STEP_TITLES.length}</span>
     <h2 class="onboarding__title">{STEP_TITLES[currentStep - 1]}</h2>
 
     {#if currentStep >= 2 && currentStep <= 4}
@@ -173,25 +240,16 @@
         {stepConfigured(currentStep) ? 'Configurado' : 'Não configurado'}
       </p>
     {:else if currentStep === 5}
-      <button
-        type="button"
-        class="onboarding__skip"
-        data-onboarding-skip
-        onclick={skipCommunity}
-      >
-        Pular
-      </button>
-    {:else if currentStep === 6}
-      <div class="onboarding__trial" data-trial-card>
-        <button type="button" class="onboarding__trial-start" onclick={() => oncomplete?.()}>
-          Iniciar teste de 7 dias
+      <div class="onboarding__finish" data-finish-card>
+        <button type="button" class="ob-btn ob-btn--primary" onclick={() => oncomplete?.()}>
+          Concluir configuracao
         </button>
       </div>
     {/if}
   </section>
 
-  {#if currentStep < 6}
-    <button type="button" class="onboarding__next" data-onboarding-next onclick={advance}>
+  {#if currentStep < 5}
+    <button type="button" class="ob-btn ob-btn--primary onboarding__next" data-onboarding-next onclick={advance}>
       Avançar
     </button>
   {/if}
@@ -202,101 +260,189 @@
     display: flex;
     flex-direction: column;
     gap: 1.6rem;
-    max-width: 72rem;
+    max-width: 50rem;
     margin: 0 auto;
-    padding: 1.6rem;
+    padding: 2.8rem 1.6rem;
   }
 
+  /* ── Progresso de passos (pills) ── */
   .onboarding__steps {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.8rem;
+    gap: 6px;
     list-style: none;
     margin: 0;
     padding: 0;
   }
 
   .onboarding__step-item {
-    font-size: 1.2rem;
-    padding: 0.6rem 1rem;
-    color: var(--surface-content);
-    background: var(--surface-fill);
-    border: 0.1rem solid var(--surface-border);
+    font-size: 1.1rem;
+    font-weight: 500;
+    padding: 4px 1rem;
+    color: var(--text-t);
+    background: rgba(255, 255, 255, 0.05);
+    border: 0.1rem solid var(--rim);
     border-radius: 2rem;
+    transition:
+      background 0.2s,
+      color 0.2s,
+      border-color 0.2s;
   }
 
+  .onboarding__step-item.done {
+    color: var(--text-s);
+    border-color: rgba(90, 87, 232, 0.45);
+  }
+
+  .onboarding__step-item.on {
+    color: var(--text-p);
+    background: var(--iris-dim);
+    border-color: rgba(90, 87, 232, 0.35);
+  }
+
+  /* ── Card do passo (mock: .ob-card) ── */
   .onboarding__panel {
     display: flex;
     flex-direction: column;
     gap: 1.2rem;
-    padding: 1.6rem;
-    color: var(--surface-content);
-    background: var(--surface-fill);
-    border: 0.1rem solid var(--surface-border);
-    border-radius: 1.2rem;
-    box-shadow: var(--surface-shadow);
+    padding: 2.8rem;
+    background: var(--elevated);
+    border: 0.1rem solid var(--rim);
+    border-radius: 1rem;
+    position: relative;
+    overflow: hidden;
     backdrop-filter: blur(var(--surface-blur));
     -webkit-backdrop-filter: blur(var(--surface-blur));
+  }
+
+  .onboarding__panel::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 45%;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, transparent 100%);
+    pointer-events: none;
+  }
+
+  .ob-eyebrow {
+    font-size: 1.1rem;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--iris);
   }
 
   .onboarding__title {
-    font-size: 1.6rem;
+    font-size: 2rem;
+    font-weight: 700;
+    letter-spacing: -0.025em;
+    line-height: 1.2;
+    text-wrap: balance;
     margin: 0;
+    color: var(--text-p);
   }
 
+  /* ── Tabela de permissões (mock: .perm-table / .prow) ── */
   .onboarding__permissions {
     display: flex;
     flex-direction: column;
-    gap: 0.8rem;
+    gap: 4px;
   }
 
-  .onboarding__permission {
+  .prow {
     display: flex;
+    align-items: center;
     justify-content: space-between;
-    gap: 1.6rem;
-    padding: 0.8rem 1.2rem;
-    background: var(--surface-fill);
-    border: 0.1rem solid var(--surface-border);
-    border-radius: 1.2rem;
-    backdrop-filter: blur(var(--surface-blur));
-    -webkit-backdrop-filter: blur(var(--surface-blur));
+    gap: 1rem;
+    padding: 0.9rem 1.2rem;
+    background: rgba(255, 255, 255, 0.03);
+    border: 0.1rem solid var(--rim);
+    border-radius: 0.8rem;
   }
 
-  .onboarding__permission-name {
+  .prow--pending {
+    border-color: rgba(255, 214, 10, 0.3);
+    background: rgba(255, 214, 10, 0.04);
+  }
+
+  .pinfo {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .pname {
+    font-size: 1.2rem;
     font-weight: 600;
+    color: var(--text-p);
   }
 
-  .onboarding__permission-function {
-    text-align: right;
+  .pfunc {
+    font-size: 1.1rem;
+    color: var(--text-t);
+  }
+
+  .pstatus {
+    font-size: 1.1rem;
+    font-weight: 600;
+    flex-shrink: 0;
+    color: var(--yellow);
+  }
+
+  .pstatus--ok {
+    color: var(--green);
   }
 
   .onboarding__guidance,
   .onboarding__status {
     margin: 0;
     font-size: 1.3rem;
+    line-height: 1.65;
+    color: var(--text-s);
   }
 
-  .onboarding__next,
-  .onboarding__skip,
-  .onboarding__grant,
-  .onboarding__trial-start {
+  /* ── Ações (mock: .ob-actions) ── */
+  .ob-btn {
     font: inherit;
-    padding: 0.8rem 1.4rem;
-    color: var(--surface-content);
-    background: var(--surface-fill);
-    border: 0.1rem solid var(--surface-border);
-    border-radius: 1.2rem;
+    font-size: 1.2rem;
+    font-weight: 500;
+    padding: 0.6rem 1.4rem;
+    align-self: flex-end;
+    color: var(--text-s);
+    background: rgba(255, 255, 255, 0.06);
+    border: 0.1rem solid var(--rim);
+    border-radius: 0.7rem;
     cursor: pointer;
+    transition:
+      background 0.12s,
+      color 0.12s;
+  }
+
+  .ob-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-p);
+  }
+
+  .ob-btn--primary {
+    color: #fff;
+    background: var(--iris);
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+
+  .ob-btn--primary:hover {
+    opacity: 0.88;
+    background: var(--iris);
+    color: #fff;
   }
 
   .onboarding__next {
     align-self: flex-end;
   }
 
-  .onboarding__trial {
-    padding: 1.6rem;
-    border: 0.1rem solid var(--surface-border);
-    border-radius: 1.2rem;
-    box-shadow: var(--surface-shadow);
+  .onboarding__finish {
+    display: flex;
+    justify-content: flex-end;
   }
 </style>

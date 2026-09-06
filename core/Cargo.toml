@@ -12,10 +12,16 @@ name = "ray_core"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# `macos-private-api`: exigido por `transparent: true` no macOS (appbar).
+# `tray-icon`: icone na barra de menu (o Ray nao aparece na Dock — LSUIElement).
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ts-rs = "10"
+# base64 para payload de screenshots (capture_screen -> UI -> sidecar).
+base64 = "0.22"
+# StreamExt para consumir bytes_stream do SSE (T-303/RNF-102).
+futures-util = "0.3"
 # HTTP client para falar com o sidecar em loopback (ADR-005).
 reqwest = { version = "0.12", features = ["json", "stream"] }
 tokio = { version = "1", features = ["full"] }
@@ -24,6 +30,8 @@ thiserror = "2"
 raw-window-handle = "0.6"
 # T-502: auto-update assinado (RID-4/ADR-009).
 tauri-plugin-updater = "2"
+# RF-603: atalhos globais do SO (operam com o app sem foco/stealth).
+tauri-plugin-global-shortcut = "2"
 # T-503: logging local de erros apenas (RF-1004). simplelog: zero-config file writer.
 log = "0.4"
 simplelog = "0.12"
@@ -33,13 +41,33 @@ arboard = { version = "3", default-features = false }
 # Cofre de credenciais nativo por plataforma (ADR-003).
 # Features por SO: apple-native (macOS), linux-native (Linux), windows-native (Windows).
 
+# Captura de áudio real (mic + loopback quando presente) — T-500.
+cpal = "0.18"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
 # macOS: NSWindow FFI para stealth (sharingType) e opacidade (alphaValue).
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView"] }
-# macOS STT (ADR-007): SFSpeechRecognizer via raw objc2 + block2 for callbacks.
+# Permissoes TCC (mic/fala): AVCaptureDevice + SFSpeechRecognizer via msg_send.
+objc2-foundation = { version = "0.3", features = ["NSString"] }
+# STT real (ADR-007): SFSpeechRecognizer + AVAudioFormat/AVAudioPCMBuffer.
+objc2-speech = { version = "0.3", features = [
+    "SFSpeechRecognizer",
+    "SFSpeechRecognitionRequest",
+    "SFSpeechRecognitionResult",
+    "SFSpeechRecognitionTask",
+    "SFTranscription",
+    "block2",
+] }
+objc2-avf-audio = { version = "0.3", features = [
+    "AVAudioFormat",
+    "AVAudioBuffer",
+    "AVAudioTypes",
+] }
+# Handlers async das dialogs de permissao (T-405/RF-103).
 block2 = "0.6"
+# macOS STT (ADR-007): SFSpeechRecognizer via raw objc2 + block2 for callbacks.
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["linux-native"] }

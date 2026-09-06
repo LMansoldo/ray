@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, cleanup, fireEvent } from '@testing-library/svelte'
 import { tick } from 'svelte'
 import Onboarding from './Onboarding.svelte'
@@ -6,12 +6,13 @@ import { setOnboardingStateFeed, resetOnboardingStateFeed } from './state-feed'
 import { dispatchOnboardingRestart } from './restart'
 import type { OnboardingState } from './types'
 
-// Contrato T-405 / RF-101..104: fluxo de onboarding em 6 passos ordenados
-// (permissões, áudio, transcrição, análise, comunidade [opcional], trial),
+// Contrato T-405 / RF-101..104: fluxo de onboarding em 5 passos ordenados
+// (permissões, áudio, transcrição, análise, comunidade [opcional, terminal]),
 // progressão travada pelo estado de conclusão de cada passo (contrato: "cada
-// passo reflete o estado real"), cartão do trial no passo 6 (RF-902) e
-// reinício via Ajuda → Reiniciar Integração (RF-102 / RF-1003 — aqui
-// disparado pelo dispatch local; o menu Ajuda em si é T-406).
+// passo reflete o estado real"), conclusão pelo botão "Concluir configuracao"
+// no passo 5 e reinício via Ajuda → Reiniciar Integração (RF-102 / RF-1003 —
+// aqui disparado pelo dispatch local; o menu Ajuda em si é T-406).
+// O uso completo é o default — não existe passo de trial.
 //
 // O estado real (permissões concedidas, dispositivos, provider configurado)
 // NÃO é legível pela UI hoje: core/src/lib.rs registra apenas set_stealth /
@@ -65,8 +66,8 @@ afterEach(() => {
   resetOnboardingStateFeed()
 })
 
-describe('Onboarding — fluxo ordenado (RF-101)', () => {
-  it('renderiza os 6 passos na ordem do RF-101 e começa no passo 1', () => {
+describe('Onboarding — fluxo ordenado', () => {
+  it('renderiza os 5 passos na ordem do fluxo e começa no passo 1', () => {
     setOnboardingStateFeed(() => grantedState())
     const { container, getByRole } = render(Onboarding)
 
@@ -77,7 +78,6 @@ describe('Onboarding — fluxo ordenado (RF-101)', () => {
       'Transcrição',
       'Análise de texto e imagem',
       'Comunidade e ajuda',
-      'Trial de 7 dias',
     ])
 
     expect(currentStep(container)).toBe('1')
@@ -87,7 +87,7 @@ describe('Onboarding — fluxo ordenado (RF-101)', () => {
     expect(getByRole('button', { name: 'Avançar' })).toBeDefined()
   })
 
-  it('com todas as etapas completas, avança passo a passo até o 6', async () => {
+  it('com todas as etapas completas, avança passo a passo até o 5', async () => {
     setOnboardingStateFeed(() => grantedState())
     const { container } = render(Onboarding)
 
@@ -104,17 +104,18 @@ describe('Onboarding — fluxo ordenado (RF-101)', () => {
     expect(currentStep(container)).toBe('3')
     await advanceTo(container, 5)
     expect(currentStep(container)).toBe('5')
-    await advanceTo(container, 6)
-    expect(currentStep(container)).toBe('6')
   })
 
-  it('o passo 6 renderiza o cartão do trial de 7 dias (RF-902)', async () => {
+  it('o passo 5 renderiza a conclusão que dispara oncomplete', async () => {
     setOnboardingStateFeed(() => grantedState())
-    const { container, getByRole } = render(Onboarding)
+    const oncomplete = vi.fn()
+    const { container, getByRole } = render(Onboarding, { props: { oncomplete } })
 
-    await advanceTo(container, 6)
-    expect(container.querySelector('[data-trial-card]'), 'o cartão do trial deve existir').not.toBeNull()
-    expect(getByRole('button', { name: 'Iniciar teste de 7 dias' })).toBeDefined()
+    await advanceTo(container, 5)
+    expect(container.querySelector('[data-finish-card]'), 'o cartão de conclusão deve existir').not.toBeNull()
+
+    await fireEvent.click(getByRole('button', { name: 'Concluir configuracao' }))
+    expect(oncomplete).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -164,20 +165,17 @@ describe('Onboarding — progressão travada pelo estado (RF-101 / contrato)', (
     expect(currentStep(container)).toBe('4')
   })
 
-  it('o passo 5 é opcional: Pular leva direto ao passo 6', async () => {
+  it('o passo 5 é opcional e terminal: Concluir dispara oncomplete sem travas', async () => {
     setOnboardingStateFeed(() => grantedState())
-    const { container, getByRole } = render(Onboarding)
+    const oncomplete = vi.fn()
+    const { container, getByRole } = render(Onboarding, { props: { oncomplete } })
 
     await advanceTo(container, 5)
     expect(currentStep(container)).toBe('5')
-    expect(getByRole('button', { name: 'Pular' })).toBeDefined()
+    expect(getByRole('button', { name: 'Concluir configuracao' })).toBeDefined()
 
-    const skip = container.querySelector('[data-onboarding-skip]')
-    if (!skip) {
-      throw new Error('botão Pular não encontrado')
-    }
-    await fireEvent.click(skip)
-    expect(currentStep(container)).toBe('6')
+    await fireEvent.click(getByRole('button', { name: 'Concluir configuracao' }))
+    expect(oncomplete).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -257,34 +255,26 @@ describe('Onboarding — concessão e reinício do app (RF-104)', () => {
     }
   })
 
-  it('oferece "Conceder permissões ausentes" apenas quando algo falta', () => {
+  it('oferece "Habilitar tudo" apenas quando algo falta', () => {
     setOnboardingStateFeed(() => ({
       ...grantedState(),
       permissions: { ...grantedState().permissions, accessibility: 'notGranted' },
     }))
     const first = render(Onboarding)
-    expect(first.getByRole('button', { name: 'Conceder permissões ausentes' })).toBeDefined()
+    expect(
+      first.getByRole('button', { name: 'Habilitar tudo' }),
+      'botão de habilitar permissões quando algo falta',
+    ).toBeDefined()
+    expect(
+      first.container.querySelector('[data-onboarding-refresh-permissions]'),
+      'botão de reavaliar o status TCC',
+    ).not.toBeNull()
 
     cleanup()
     setOnboardingStateFeed(() => grantedState())
     const second = render(Onboarding)
-    expect(second.queryByRole('button', { name: 'Conceder permissões ausentes' })).toBeNull()
-  })
-
-  it('orienta o reinício do app quando uma permissão é exigida, e some quando completo', () => {
-    setOnboardingStateFeed(() => ({
-      ...grantedState(),
-      permissions: { ...grantedState().permissions, screenRecording: 'notGranted' },
-    }))
-    const first = render(Onboarding)
-    const guidance = first.container.querySelector('[data-onboarding-restart-guidance]')
-    expect(guidance, 'a orientação de reinício deve existir').not.toBeNull()
-    expect(guidance?.textContent).toMatch(/reinici/i)
-
-    cleanup()
-    setOnboardingStateFeed(() => grantedState())
-    const second = render(Onboarding)
-    expect(second.container.querySelector('[data-onboarding-restart-guidance]')).toBeNull()
+    expect(second.queryByRole('button', { name: 'Habilitar tudo' })).toBeNull()
+    expect(second.container.querySelector('[data-onboarding-refresh-permissions]')).toBeNull()
   })
 })
 

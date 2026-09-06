@@ -9,10 +9,9 @@
   // pausa quando o usuário rola para cima e retoma ao voltar ao fim.
   import { glassTokens } from '../../lib/glass/tokens'
   import MarkdownView from '../../lib/markdown/MarkdownView.svelte'
-  import { dispatchOverlayAction } from './overlay-actions'
   import type { InsightCardProps } from './types'
 
-  let { state }: InsightCardProps = $props()
+  let { state, autoScroll = true }: InsightCardProps = $props()
 
   // DOM refs e o flag da rolagem são `let` simples (padrão do
   // MarkdownEditor T-408), NUNCA a rune $state: com a prop `state` no escopo
@@ -30,17 +29,12 @@
     followEnd = reachedEnd
   }
 
-  function openUseCase(): void {
-    if (state.suggestionId === null) return
-    dispatchOverlayAction({ type: 'viewUseCase', suggestionId: state.suggestionId })
-  }
-
   $effect(() => {
     // A leitura de state.text registra a dependência: o efeito reexecuta a
     // cada token (com o DOM já atualizado) e leva a rolagem até o fim.
     state.text
     const body = sayThisBody
-    if (body !== null && followEnd) {
+    if (body !== null && followEnd && autoScroll) {
       body.scrollTop = body.scrollHeight - body.clientHeight
     }
   })
@@ -90,7 +84,10 @@
       bind:this={sayThisBody}
       onscroll={handleScroll}
     >
-      <MarkdownView markdown={state.text} />
+      <MarkdownView markdown={state.text} />{#if state.status === 'streaming'}<span
+          class="cursor"
+          aria-hidden="true"
+        ></span>{/if}
     </div>
   </section>
 
@@ -99,25 +96,39 @@
       {state.error?.message ?? ''}
     </p>
   {/if}
-
-  <button type="button" class="insight-card__action" onclick={openUseCase}>
-    Ver caso de uso
-  </button>
 </article>
 
 <style>
   .insight-card {
     display: flex;
     flex-direction: column;
-    gap: 1.2rem;
-    max-width: 44rem;
-    padding: 1.6rem;
-    color: var(--surface-content);
-    background: var(--surface-fill);
-    border: 0.1rem solid var(--surface-border);
-    border-radius: 1.2rem;
-    box-shadow: var(--surface-shadow);
+    gap: 1.4rem;
+    width: 42rem;
+    max-width: 100%;
+    padding: 1.8rem;
+    color: var(--surface-content, var(--text-p));
+    background: var(--surface-fill, rgba(20, 22, 36, 0.93));
+    border: 0.1rem solid var(--surface-border, rgba(255, 255, 255, 0.13));
+    border-radius: 1.4rem;
+    box-shadow:
+      var(--surface-shadow, 0 2rem 6rem rgba(0, 0, 0, 0.55)),
+      0 0.2rem 0.8rem rgba(0, 0, 0, 0.35),
+      inset 0 1px 0 rgba(255, 255, 255, 0.07);
+    position: relative;
+    overflow: hidden;
     backdrop-filter: blur(var(--surface-blur));
+    -webkit-backdrop-filter: blur(var(--surface-blur));
+  }
+
+  .insight-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 40%;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, transparent 100%);
+    pointer-events: none;
   }
 
   .insight-card__context {
@@ -127,13 +138,22 @@
   }
 
   .insight-card__context-icon {
+    width: 2.4rem;
+    height: 2.4rem;
+    border-radius: 6px;
+    background: rgba(90, 87, 232, 0.15);
+    border: 0.1rem solid rgba(90, 87, 232, 0.28);
     display: inline-flex;
-    color: var(--surface-content);
-    opacity: 0.6;
+    align-items: center;
+    justify-content: center;
+    color: var(--iris);
+    flex-shrink: 0;
   }
 
   .insight-card__context-label {
-    font-size: 1.3rem;
+    font-size: 1.2rem;
+    color: var(--text-s);
+    font-weight: 500;
   }
 
   .insight-card__block {
@@ -144,44 +164,66 @@
 
   .insight-card__heading {
     margin: 0;
-    font-size: 1.1rem;
-    font-weight: 600;
-    letter-spacing: 0.08em;
+    font-size: 1rem;
+    font-weight: 700;
+    letter-spacing: 0.09em;
     text-transform: uppercase;
-    opacity: 0.75;
+    color: var(--text-t);
   }
 
   .insight-card__quote {
     margin: 0;
     font-size: 1.3rem;
     font-style: italic;
-    opacity: 0.9;
+    color: var(--text-s);
+    line-height: 1.55;
   }
 
   .insight-card__body {
-    max-height: 24rem;
+    max-height: 18rem;
     overflow-y: auto;
     padding-right: 0.4rem;
-    font-size: 1.4rem;
+    font-size: 1.3rem;
+    line-height: 1.65;
+    color: var(--text-p);
+  }
+
+  /* Cursor de streaming (mock: .cursor) */
+  .cursor {
+    display: inline-block;
+    width: 2px;
+    height: 1.4rem;
+    background: var(--iris);
+    vertical-align: text-bottom;
+    margin-left: 1px;
+    animation: blink 1s step-end infinite;
+  }
+
+  @keyframes blink {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .cursor {
+      animation: none !important;
+    }
   }
 
   .insight-card__error {
     margin: 0;
     padding: 0.8rem 1rem;
     font-size: 1.2rem;
-    border: 0.1rem solid var(--surface-border);
+    color: var(--error);
+    border: 0.1rem solid var(--rim);
     border-radius: 0.8rem;
+    background: rgba(255, 69, 58, 0.08);
   }
 
-  .insight-card__action {
-    align-self: flex-start;
-    font: inherit;
-    font-size: 1.2rem;
-    padding: 0.5rem 1rem;
-    color: var(--surface-content);
-    background: transparent;
-    border: 0.1rem solid var(--surface-border);
-    border-radius: 1.2rem;
-    cursor: pointer;
-  }
+
 </style>

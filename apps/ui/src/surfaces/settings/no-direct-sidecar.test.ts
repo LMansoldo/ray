@@ -4,9 +4,10 @@ import { describe, it, expect } from 'vitest'
 // fala APENAS com o núcleo Rust via invoke() — nunca com o sidecar (HTTP em
 // loopback). Este teste varre os fontes da superfície e falha se algum
 // arquivo abrir conexão direta com o sidecar. Também garante que os módulos
-// do contrato existem, que não há emojis (regra geral do repo) e que nenhum
-// arquivo de implementação usa APIs de persistência/armazenamento — a UI
-// nunca persiste nada, muito menos segredos (ADR-003).
+// do contrato existem, que não há emojis (regra geral do repo) e que a
+// persistência local fica limitada a uma allowlist de chaves de PREFERÊNCIA
+// (ray_models/ray_audio_meters) — nunca segredos nem estado arbitrário
+// (ADR-003: segredo vive no vault; o gravável de sessão vive no núcleo).
 //
 // Os fontes são lidos como texto cru via import.meta.glob (?raw) do Vite —
 // sem node:fs/node:path, cujos tipos não entram no tsconfig.app
@@ -30,11 +31,15 @@ const SIDECAR_ACCESS_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bXMLHttpRequest\b/, label: 'XMLHttpRequest' },
 ]
 
-// ADR-003 / general.md (Secrets): a UI nunca persiste nada em storage —
-// o estado gravável vive no núcleo (vault + sidecar/Prisma). Qualquer uso
-// destas APIs na superfície é uma violação do invariante.
+// ADR-003 / general.md (Secrets): a UI persiste localmente APENAS as
+// preferências não-secretas desta allowlist (medidores, modelos por
+// função). Qualquer outro uso de storage é violação — segredo digitado
+// jamais toca storage (o gravável de verdade vive no núcleo: vault +
+// sidecar/Prisma).
+const ALLOWED_STORAGE_KEYS: readonly string[] = ['ray_audio_meters', 'ray_models']
+
+// Storage/cookie fora da allowlist: proibidos na implementação.
 const PERSISTENCE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
-  { pattern: /\blocalStorage\b/, label: 'localStorage (UI nunca persiste)' },
   { pattern: /\bsessionStorage\b/, label: 'sessionStorage (UI nunca persiste)' },
   { pattern: /document\.cookie/, label: 'cookie (UI nunca persiste)' },
 ]
@@ -115,9 +120,26 @@ describe('superfície Configurações — sem acesso direto ao sidecar (ADR-001 
 })
 
 describe('superfície Configurações — invariante de segredos (ADR-003)', () => {
-  it('nenhum arquivo de implementação usa storage/cookie — a UI nunca persiste', () => {
+  it('localStorage só com chaves de preferência allowlistadas; nada mais persiste', () => {
+    const violations: string[] = []
+    for (const source of loadSources()) {
+      source.content.split('\n').forEach((line, index) => {
+        if (!/\blocalStorage\b/.test(line)) {
+          return
+        }
+        if (!ALLOWED_STORAGE_KEYS.some((key) => line.includes(key))) {
+          violations.push(
+            `${source.path}:${index + 1} — localStorage fora da allowlist: ${line.trim()}`,
+          )
+        }
+      })
+    }
+    expect(violations, 'persistência fora da allowlist encontrada').toEqual([])
+  })
+
+  it('nenhum arquivo de implementação usa sessionStorage/cookie', () => {
     const violations = collectViolations(loadSources(), PERSISTENCE_PATTERNS)
-    expect(violations, 'persistência encontrada na UI').toEqual([])
+    expect(violations, 'persistência proibida encontrada na UI').toEqual([])
   })
 })
 

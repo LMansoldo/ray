@@ -1,0 +1,37 @@
+#!/bin/sh
+# Launcher do sidecar Ray (substitui o stub T-501 parcialmente: o binário
+# autocontido via `pkg` segue como TODO — este launcher usa o Node do host).
+#
+# Layout esperado no bundle:
+#   Ray.app/Contents/MacOS/ray-sidecar-<triple>   (este script)
+#   Ray.app/Contents/Resources/sidecar/           (dist + prisma + node_modules)
+#
+# O DATABASE_URL (SQLite no app data dir) é injetado pelo núcleo Rust
+# (core/src/sidecar.rs) no ambiente do processo.
+
+DIR=$(cd "$(dirname "$0")" && pwd)
+DIST="dist/server.js"
+
+# Layouts suportados, em ordem:
+#   1. RAY_SIDECAR_RES                     (override explicito)
+#   2. bundle:  ../Resources/resources/sidecar  (tauri preserva o prefixo)
+#   3. bundle:  ../Resources/sidecar       (caso o prefixo sumir)
+#   4. dev:     ../../resources/sidecar    (core/target/<mode>/ -> core/resources/)
+RES_CANDIDATES="${RAY_SIDECAR_RES:-} $DIR/../Resources/resources/sidecar $DIR/../Resources/sidecar $DIR/../../resources/sidecar"
+
+for RES in $RES_CANDIDATES; do
+  if [ -f "$RES/$DIST" ]; then
+    NODE_BAKED="@NODE_PATH@"
+    for n in "$NODE_BAKED" /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
+      if [ -x "$n" ]; then
+        # import() dinamico: roda ESM sem depender de package.json ("type").
+        exec "$n" -e "const{pathToFileURL}=require('url');import(pathToFileURL(process.argv[1]).href).catch(e=>{console.error(e);process.exit(1)})" "$RES/$DIST"
+      fi
+    done
+    echo "[ray-sidecar] runtime Node nao encontrado (tentou: $NODE_BAKED)" >&2
+    exit 1
+  fi
+done
+
+echo "[ray-sidecar] sidecar resources nao encontrados (tentou: $RES_CANDIDATES)" >&2
+exit 1

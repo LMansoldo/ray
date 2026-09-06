@@ -2,18 +2,22 @@
 //! Reúne os módulos e expõe os comandos Tauri consumidos pela UI Svelte.
 
 pub mod audio;
+pub mod capture;
 pub mod ipc;
 pub mod ipc_client;
 pub mod logging;
+pub mod permissions;
 pub mod shortcuts;
 pub mod sidecar;
 pub mod stt;
 pub mod vault;
 pub mod windows;
 
+use crate::shortcuts::ShortcutCommand;
 use ipc::SuggestRequest;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU16, Ordering};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 // --- Estado do sidecar ---------------------------------------------------
 // Porta loopback do sidecar, registrada pelo supervisor (sidecar.rs) após
@@ -68,6 +72,94 @@ fn hide_window(app: tauri::AppHandle, window_label: String) -> Result<(), String
         .map_err(|e| e.to_string())
 }
 
+/// Define a opacidade de uma superfície (RF-506 — atalhos ⌘⇧+ / ⌘⇧−).
+#[tauri::command]
+fn set_window_opacity(window_label: String, opacity: f64) {
+    windows::set_opacity(&window_label, opacity);
+}
+
+/// Alterna sempre-no-topo de uma janela (RF-505 — atalho ⌘⇧A).
+#[tauri::command]
+fn set_always_on_top(window_label: String, enabled: bool) {
+    windows::set_always_on_top(&window_label, enabled);
+}
+
+/// Níveis de medidor por canal (RF-206 — a UI pesquisa durante a reunião).
+#[tauri::command]
+fn get_meter_levels() -> Vec<serde_json::Value> {
+    audio::get_meter_levels()
+        .into_iter()
+        .map(|m| serde_json::json!({ "channelId": m.channel_id, "rms": m.rms }))
+        .collect()
+}
+
+/// Alterna a captura do microfone (canal VOCÊ), preservando o OUTROS.
+/// Retorna o novo estado (RF-604 — ⌘⇧D).
+#[tauri::command]
+fn toggle_mic_capture() -> bool {
+    audio::set_mic_capture(!audio::mic_capture_enabled())
+}
+
+/// Mostra a janela do Notch ancorada no topo-centro do monitor (RF-013).
+#[tauri::command]
+fn show_notch(app: tauri::AppHandle) -> Result<(), String> {
+    let win = app
+        .get_webview_window("notch")
+        .ok_or_else(|| "janela 'notch' nao encontrada".to_string())?;
+    if let Ok(Some(mon)) = win.current_monitor() {
+        let m_size = mon.size();
+        let m_pos = mon.position();
+        if let Ok(size) = win.outer_size() {
+            let x = m_pos.x + ((m_size.width.saturating_sub(size.width)) / 2) as i32;
+            let y = m_pos.y + 8;
+            let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+        }
+    }
+    windows::set_always_on_top("notch", true);
+    win.show().map_err(|e| e.to_string())
+}
+
+/// Lista sessões recentes (RF-802) — delega ao sidecar.
+#[tauri::command]
+fn list_sessions() -> Result<serde_json::Value, String> {
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    if port == 0 {
+        return Ok(serde_json::json!({ "sessions": [] }));
+    }
+    unwrap_ipc(sidecar_request(port, "GET", "/sessions", None)?)
+}
+
+/// Detalhe de uma sessão (transcrição ordenada) — delega ao sidecar.
+#[tauri::command]
+fn get_session(session_id: String) -> Result<serde_json::Value, String> {
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    if port == 0 {
+        return Err("sidecar not started".into());
+    }
+    unwrap_ipc(sidecar_request(port, "GET", &format!("/sessions/{session_id}"), None)?)
+}
+
+/// Settings persistidos (features + atalhos) — delega ao sidecar.
+#[tauri::command]
+fn get_app_settings() -> Result<serde_json::Value, String> {
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    if port == 0 {
+        return Err("sidecar not started".into());
+    }
+    unwrap_ipc(sidecar_request(port, "GET", "/settings", None)?)
+}
+
+/// Persiste features (RF-700) via sidecar.
+#[tauri::command]
+fn save_feature_toggles(features: serde_json::Value) -> Result<serde_json::Value, String> {
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    if port == 0 {
+        return Err("sidecar not started".into());
+    }
+    let body = serde_json::json!({ "features": features });
+    unwrap_ipc(sidecar_request(port, "PUT", "/settings", Some(body))?)
+}
+
 /// Resolver de credencial que consulta o cofre nativo (vault).
 /// Usado como `fn` pointer injetável em `ipc_client::post_suggest_to_sidecar`.
 fn vault_resolve(secret_ref: &str) -> Result<String, String> {
@@ -94,39 +186,58 @@ fn transcribe_pending_pcm(
 /// banco). O núcleo resolve esse ref via `vault::get_secret` e substitui
 /// pelo segredo real antes de enviar ao sidecar. O segredo é efêmero:
 /// usado apenas nesta requisição, nunca logado, nunca persistido (ADR-003).
-#[tauri::command]
-fn suggest(req: SuggestRequest) -> Result<(), String> {
-    // 1. Obter base_url do sidecar (T-300).
-    let port = SIDECAR_PORT.load(Ordering::Acquire);
+/// Emissor de produção: cada SuggestStreamEvent vira um evento Tauri
+/// `suggest-stream`, consumido pelo Overlay (streaming token a token).
+#[derive(Clone)]
+struct TauriEmitter {
+    app: tauri::AppHandle,
+}
+
+impl ipc_client::SuggestEventEmitter for TauriEmitter {
+    fn emit_event(&self, event: ipc::SuggestStreamEvent) {
+        use tauri::Emitter;
+        let _ = self.app.emit("suggest-stream", &event);
+    }
+}
+
+/// Núcleo do suggest, testável sem AppHandle (o emitter é injetável).
+fn suggest_with_stream<E: ipc_client::SuggestEventEmitter>(
+    port: u16,
+    req: SuggestRequest,
+    emitter: E,
+) -> Result<(), String> {
     if port == 0 {
         return Err("sidecar not started".into());
     }
     let base_url = format!("http://127.0.0.1:{}", port);
 
-    // 2. Delegar ao ipc_client: resolve vault + injeta + POST.
-    //    Thread dedicada com runtime tokio isolado — reqwest async
-    //    precisa de runtime e o comando Tauri pode rodar em contexto
-    //    sem runtime tokio.
-    let handle = std::thread::spawn(move || -> Result<(), ipc_client::IpcClientError> {
+    let handle = std::thread::spawn(move || -> Result<(), String> {
         let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| {
-                ipc_client::IpcClientError::Http(format!("failed to create runtime: {}", e))
-            })?;
-        rt.block_on(ipc_client::post_suggest_to_sidecar(
+            .map_err(|e| format!("failed to create runtime: {e}"))?;
+        rt.block_on(ipc_client::stream_suggest_events(
             &base_url,
             req,
             vault_resolve,
+            emitter,
         ))
+        .map_err(|e| match e {
+            ipc_client::IpcClientError::Credential(msg) => msg,
+            ipc_client::IpcClientError::Http(msg) => msg,
+        })
     });
 
     match handle.join() {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(ipc_err)) => Err(match ipc_err {
-            ipc_client::IpcClientError::Credential(msg) => msg,
-            ipc_client::IpcClientError::Http(msg) => msg,
-        }),
+        Ok(Err(msg)) => Err(msg),
         Err(_) => Err("sidecar request thread panicked".to_string()),
     }
+}
+
+#[tauri::command]
+fn suggest(app: tauri::AppHandle, req: SuggestRequest) -> Result<(), String> {
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    let emitter = TauriEmitter { app };
+    suggest_with_stream(port, req, emitter)
 }
 
 /// Implementação interna injetável do comando `suggest`.
@@ -142,7 +253,12 @@ pub(crate) async fn suggest_with_emitter<E: ipc_client::SuggestEventEmitter>(
     base_url: &str,
     emitter: E,
 ) -> Result<(), String> {
-    todo!("T-303: wire suggest_with_emitter to stream_suggest_events")
+    ipc_client::stream_suggest_events(base_url, req, vault_resolve, emitter)
+        .await
+        .map_err(|e| match e {
+            ipc_client::IpcClientError::Credential(msg) => msg,
+            ipc_client::IpcClientError::Http(msg) => msg,
+        })
 }
 
 // ── Testes do comando suggest (T-302) ──────────────────────────────────
@@ -167,6 +283,15 @@ mod tests {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         format!("{}_{}_{}", prefix, std::process::id(), n)
+    }
+
+    /// Emitter no-op para os testes do comando suggest.
+    fn test_emitter() -> impl ipc_client::SuggestEventEmitter {
+        struct NoopEmitter;
+        impl ipc_client::SuggestEventEmitter for NoopEmitter {
+            fn emit_event(&self, _event: SuggestStreamEvent) {}
+        }
+        NoopEmitter
     }
 
     fn build_request(credential: InjectedCredential) -> SuggestRequest {
@@ -205,7 +330,7 @@ mod tests {
             model: None,
         });
 
-        let result = suggest(req);
+        let result = suggest_with_stream(0, req, test_emitter());
         // RED: retorna Err("not_implemented") → !contains("not_implemented") falha.
         // GREEN: retorna Err com mensagem do vault (NotFound) → passa.
         assert!(
@@ -242,7 +367,7 @@ mod tests {
 
         // Cleanup DEPOIS de suggest — vault::get_secret precisa da entrada
         // existir durante a resolucao.
-        let result = suggest(req);
+        let result = suggest_with_stream(0, req, test_emitter());
         let _ = vault::delete_secret(&secret_ref);
 
         // RED: stub retorna Err("not_implemented") → contains("not_implemented") falha.
@@ -319,7 +444,7 @@ mod tests {
         });
 
         let base_url = format!("http://127.0.0.1:{}", port);
-        let req = build_request(InjectedCredential {
+        let mut req = build_request(InjectedCredential {
             kind: ProviderKind::Openai,
             connection_mode: ProviderConnectionMode::ApiKey,
             secret: "placeholder".into(),
@@ -327,9 +452,15 @@ mod tests {
             model: None,
         });
 
-        // RED: todo!() panics → test fails with "T-303".
-        // GREEN: suggest_with_emitter calls stream_suggest_events → emitter captures events.
+        // GREEN: suggest_with_emitter delega ao stream_suggest_events, que
+        // resolve o secret_ref no cofre antes do POST — guarda um segredo
+        // real no keychain para a resolução ter sucesso.
+        let sfs_secret_ref = vault::store_secret("sse_bridge_label", "sk-sse-bridge")
+            .expect("store_secret should succeed on native keychain");
+        req.credential.secret = sfs_secret_ref.clone();
+
         let _ = suggest_with_emitter(req, &base_url, emitter).await;
+        let _ = vault::delete_secret(&sfs_secret_ref);
 
         let events = captured.lock().unwrap();
         assert!(
@@ -355,7 +486,7 @@ mod tests {
             model: None,
         });
 
-        let result = suggest(req);
+        let result = suggest_with_stream(0, req, test_emitter());
         if let Err(msg) = result {
             assert!(
                 !msg.contains(secret),
@@ -364,6 +495,720 @@ mod tests {
             );
         }
     }
+}
+
+
+// ── Meeting listening (T-306/307/100) + credenciais + assistentes ────────
+
+/// Estado da sessão de reunião em andamento ("ouvir reunião").
+struct MeetingSession {
+    session_id: String,
+    assistant_id: String,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+static MEETING: std::sync::Mutex<Option<MeetingSession>> = std::sync::Mutex::new(None);
+
+/// Contexto de transcrição acumulado (últimos 40 segmentos). Compartilhado
+/// entre o loop de STT e os fluxos acionados por atalho (Capturar Tela /
+/// Analisar Conversa) para que o copiloto receba "o que foi dito" mesmo
+/// quando o gatilho sai de um atalho global, não do ciclo automático.
+static CONTEXT_LOG: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// Adiciona um segmento ao contexto (com trim para 40 entradas).
+fn push_context(speaker: &str, text: String) {
+    let mut log = CONTEXT_LOG.lock().unwrap_or_else(|e| e.into_inner());
+    log.push((speaker.to_string(), text));
+    let len = log.len();
+    if len > 40 {
+        log.drain(..len - 40);
+    }
+}
+
+/// Últimos `n` segmentos do contexto como TranscriptContextSegment.
+fn recent_context_segments(n: usize) -> Vec<ipc::TranscriptContextSegment> {
+    let log = CONTEXT_LOG.lock().unwrap_or_else(|e| e.into_inner());
+    log.iter().rev().take(n).rev().enumerate()
+        .map(|(i, (speaker, text))| ipc::TranscriptContextSegment {
+            speaker: if speaker == "self" {
+                ipc::Speaker::Self_
+            } else {
+                ipc::Speaker::Others
+            },
+            text: text.clone(),
+            start_ms: (i as i32) * 1_000,
+        })
+        .collect()
+}
+
+/// POST/GET JSON cru ao sidecar em thread dedicada (padrão dos comandos acima).
+fn sidecar_request(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let url = format!("http://127.0.0.1:{port}{path}");
+    let method = method.to_string();
+    let handle = std::thread::spawn(move || -> Result<serde_json::Value, String> {
+        let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+        rt.block_on(async {
+            let client = reqwest::Client::new();
+            let mut builder = match method.as_str() {
+                "GET" => client.get(&url),
+                "POST" => client.post(&url),
+                "DELETE" => client.delete(&url),
+                other => return Err(format!("método desconhecido: {other}")),
+            };
+            if let Some(json) = body {
+                builder = builder.json(&json);
+            }
+            let resp = builder.send().await.map_err(|e| e.to_string())?;
+            resp.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+        })
+    });
+    handle.join().map_err(|_| "thread panicked".to_string())?
+}
+
+/// Extrai `value` de um envelope IpcResult { ok, value, error }.
+fn unwrap_ipc(value: serde_json::Value) -> Result<serde_json::Value, String> {
+    if value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        Ok(value.get("value").cloned().unwrap_or(serde_json::Value::Null))
+    } else {
+        let msg = value
+            .pointer("/error/message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("sidecar error");
+        Err(msg.to_string())
+    }
+}
+
+/// Persiste um segmento de transcrição no sidecar (sessão corrente).
+fn post_transcript(port: u16, session_id: &str, req: &ipc::AppendTranscriptRequest) {
+    let body = serde_json::json!({
+        "sessionId": req.session_id,
+        "speaker": match req.speaker {
+            ipc::Speaker::Self_ => "SELF",
+            ipc::Speaker::Others => "OTHERS",
+        },
+        "text": req.text,
+        "translatedText": req.translated_text,
+        "startMs": req.start_ms,
+        "endMs": req.end_ms,
+    });
+    if let Ok(resp) = sidecar_request(port, "POST", "/sessions/transcript", Some(body)) {
+        if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            eprintln!("[ray] appendTranscript falhou: {resp}");
+        }
+    }
+}
+
+/// Inicia "ouvir reunião": sessão no sidecar + captura dupla (microfone +
+/// áudio do sistema via ScreenCaptureKit) + loop de transcrição que persiste
+/// segmentos e emite `ray:transcript` + loop de ANÁLISE que roda o copiloto
+/// (suggest streaming) sobre o contexto acumulado a cada ~25s.
+#[tauri::command]
+fn start_meeting(app: tauri::AppHandle, assistant_id: String) -> Result<String, String> {
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    if port == 0 {
+        return Err("sidecar not started".into());
+    }
+    if let Some(m) = MEETING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+    {
+        return Ok(m.session_id.clone());
+    }
+
+    let body = serde_json::json!({
+        "userId": "local",
+        "assistantId": if assistant_id.is_empty() { None } else { Some(assistant_id.clone()) },
+    });
+    // Nova reunião começa com contexto limpo (sem vazamento da sessão anterior).
+    CONTEXT_LOG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    let resp = sidecar_request(port, "POST", "/sessions/start", Some(body))?;
+    let session_id = unwrap_ipc(resp)?
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .ok_or("sessions/start sem sessionId")?
+        .to_string();
+
+    // Canal VOCÊ: microfone. Canal OUTROS: áudio do sistema (a reunião).
+    audio::start_capture("default");
+    if !audio::start_system_capture() {
+        let _ = app.emit(
+            "ray:analysis-hint",
+            serde_json::json!({
+                "text": "Sem áudio da reunião (canal OUTROS): instale o Ray Audio Driver (driver/installer/install.sh) e defina a saída do app de reunião para um agregador (Multi-Output Device) que inclua o driver. Alternativa: BlackHole. O microfone continua sendo transcrito."
+            }),
+        );
+    }
+
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_loop = stop.clone();
+    let sid = session_id.clone();
+    let sid_store = session_id.clone();
+    let app_stt = app.clone();
+
+    std::thread::spawn(move || {
+        use std::sync::atomic::Ordering;
+        let channels: [(ipc::Speaker, &str); 2] = [
+            (ipc::Speaker::Self_, "self"),
+            (ipc::Speaker::Others, "others"),
+        ];
+        loop {
+            if stop_loop.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1_500));
+            for (speaker, label) in &channels {
+                let requests =
+                    match stt::drain_and_process(speaker.clone(), &sid) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("[ray] stt({label}): {e}");
+                            continue;
+                        }
+                    };
+                for req in requests {
+                    push_context(label, req.text.clone());
+                    let _ = app_stt.emit(
+                        "ray:transcript",
+                        serde_json::json!({ "speaker": label, "text": req.text }),
+                    );
+                    post_transcript(port, &sid, &req);
+                }
+            }
+        }
+    });
+
+    // Loop de ANÁLISE (T-300s): a cada 25s roda o copiloto com o contexto
+    // recente (mínimo 2 segmentos novos). A credencial é resolvida do cofre
+    // como no suggest manual (ADR-003) — usa a primeira disponível.
+    let app_analysis = app.clone();
+    let sid_analysis = session_id.clone();
+    let assistant = if assistant_id.is_empty() {
+        String::new()
+    } else {
+        assistant_id
+    };
+    let stop_analysis = stop.clone();
+    let assistant_analysis = assistant.clone();
+    std::thread::spawn(move || {
+        use std::sync::atomic::Ordering;
+        let mut last_analyzed_len = 0usize;
+        loop {
+            if stop_analysis.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25_000));
+            if stop_analysis.load(Ordering::SeqCst) {
+                break;
+            }
+            let (context, new_count) = {
+                let log = CONTEXT_LOG.lock().unwrap_or_else(|e| e.into_inner());
+                let recent: Vec<(String, String)> =
+                    log.iter().rev().take(12).rev().cloned().collect();
+                let new_count = log.len().saturating_sub(last_analyzed_len);
+                (recent, new_count)
+            };
+            if context.len() < 2 || new_count < 2 {
+                continue; // nada de novo o bastante para reanalisar
+            }
+            last_analyzed_len = CONTEXT_LOG
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len();
+
+            let Ok(raw) = sidecar_request(port, "GET", "/credentials", None) else {
+                continue;
+            };
+            let Ok(creds) = unwrap_ipc(raw) else {
+                continue;
+            };
+            let Some(cred) = creds
+                .get("credentials")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.first())
+                .cloned()
+            else {
+                let _ = app_analysis.emit(
+                    "ray:analysis-hint",
+                    serde_json::json!({ "text": "Configure uma API key para análise em tempo real." }),
+                );
+                continue;
+            };
+            let context_segments: Vec<ipc::TranscriptContextSegment> = context
+                .iter()
+                .enumerate()
+                .map(|(i, (speaker, text))| ipc::TranscriptContextSegment {
+                    speaker: if speaker == "self" {
+                        ipc::Speaker::Self_
+                    } else {
+                        ipc::Speaker::Others
+                    },
+                    text: text.clone(),
+                    start_ms: (i as i32) * 1_000,
+                })
+                .collect();
+            // "Ler a tela": captura o display a cada ciclo de análise e
+            // envia ao modelo multimodal (junto com o contexto de texto).
+            let screenshots = match crate::capture::capture_screen() {
+                Ok(image) => Some(vec![image]),
+                Err(e) => {
+                    eprintln!("[ray] screenshot do ciclo falhou: {e}");
+                    None
+                }
+            };
+            let req = SuggestRequest {
+                session_id: sid_analysis.clone(),
+                assistant_id: assistant_analysis.clone(),
+                trigger: ipc::SuggestionTrigger::Auto,
+                context: context_segments,
+                user_prompt: None,
+                screenshots,
+                selection_text: None,
+                credential: ipc::InjectedCredential {
+                    kind: serde_json::from_value(
+                        cred.get("kind").cloned().unwrap_or_default(),
+                    )
+                    .unwrap_or(ipc::ProviderKind::Openai),
+                    connection_mode: serde_json::from_value(
+                        cred.get("connectionMode").cloned().unwrap_or_default(),
+                    )
+                    .unwrap_or(ipc::ProviderConnectionMode::ApiKey),
+                    secret: cred
+                        .get("secretRef")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    base_url: cred
+                        .get("baseUrl")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    model: None,
+                },
+            };
+            let emitter = TauriEmitter { app: app_analysis.clone() };
+            let p = port;
+            let _ = std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().ok()?;
+                let result = rt.block_on(ipc_client::stream_suggest_events(
+                    &format!("http://127.0.0.1:{p}"),
+                    req,
+                    vault_resolve,
+                    emitter,
+                ));
+                if let Err(e) = result {
+                    eprintln!("[ray] análise automática falhou: {e:?}");
+                }
+                Some(())
+            });
+        }
+    });
+
+    let _ = app.emit(
+        "ray:meeting-started",
+        serde_json::json!({ "sessionId": session_id }),
+    );
+
+    *MEETING.lock().unwrap_or_else(|e| e.into_inner()) = Some(MeetingSession {
+        session_id: sid_store,
+        assistant_id: assistant,
+        stop,
+    });
+    Ok(session_id)
+}
+
+#[tauri::command]
+fn stop_meeting(app: tauri::AppHandle) -> Result<(), String> {
+    let meeting = MEETING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    let Some(meeting) = meeting else {
+        return Ok(());
+    };
+    meeting
+        .stop
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    audio::stop_capture();
+
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    let sid = meeting.session_id.clone();
+    // Flush final (fora do loop — o loop já parou de drenar).
+    if port != 0 {
+        if let Ok(requests) = stt::finalize_transcription(ipc::Speaker::Self_, &sid) {
+            for req in requests {
+                let _ = app.emit(
+                    "ray:transcript",
+                    serde_json::json!({ "speaker": "self", "text": req.text }),
+                );
+                post_transcript(port, &sid, &req);
+            }
+        }
+        let body = serde_json::json!({ "sessionId": sid, "generateSummary": false });
+        if let Err(e) = sidecar_request(port, "POST", "/sessions/end", Some(body)) {
+            eprintln!("[ray] sessions/end falhou: {e}");
+        }
+    }
+    let _ = app.emit("ray:meeting-stopped", serde_json::json!({}));
+    Ok(())
+}
+
+/// Valida a credencial de um slot: lê a referência no sidecar, resolve o
+/// segredo no cofre nativo e roda POST /providers/validate — define
+/// lastValidatedAt (RF-403), que alimenta o status "conectado" da UI.
+/// Valida um slot contra o provedor (GET /credentials → cofre → validate).
+/// Usado pelo comando da UI e pela validação de pendências no arranque.
+fn validate_slot(port: u16, slot: &str) -> Result<serde_json::Value, String> {
+    let creds = unwrap_ipc(sidecar_request(port, "GET", "/credentials", None)?)?;
+    let cred = creds
+        .get("credentials")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .find(|c| c.get("slot").and_then(|s| s.as_str()) == Some(slot))
+        })
+        .cloned()
+        .ok_or_else(|| format!("slot '{slot}' não configurado"))?;
+
+    let secret_ref = cred
+        .get("secretRef")
+        .and_then(|v| v.as_str())
+        .ok_or("credencial sem secretRef")?
+        .to_string();
+    let secret = vault::get_secret(&secret_ref).map_err(|e| e.to_string())?;
+
+    let body = serde_json::json!({
+        "slot": slot,
+        "credential": {
+            "kind": cred.get("kind").cloned().unwrap_or_default(),
+            "connectionMode": cred.get("connectionMode").cloned().unwrap_or_default(),
+            "secret": secret,
+            "baseUrl": cred.get("baseUrl").cloned().unwrap_or(serde_json::Value::Null),
+        }
+    });
+    unwrap_ipc(sidecar_request(port, "POST", "/providers/validate", Some(body))?)
+}
+
+#[tauri::command]
+fn validate_credential(slot: String) -> Result<serde_json::Value, String> {
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    if port == 0 {
+        return Err("sidecar not started".into());
+    }
+    validate_slot(port, &slot)
+}
+
+/// Valida credenciais salvas que ainda não foram validadas (persistidas
+/// antes da validação automática existir). Roda no arranque para que chaves
+/// salvas apareçam como "Conectado" sem exigir re-salvar.
+fn validate_pending_credentials(app: &tauri::AppHandle, port: u16) {
+    use tauri::Emitter;
+    let Ok(raw) = sidecar_request(port, "GET", "/credentials", None) else {
+        return;
+    };
+    let Ok(creds) = unwrap_ipc(raw) else {
+        return;
+    };
+    let Some(list) = creds.get("credentials").and_then(|v| v.as_array()) else {
+        return;
+    };
+    for cred in list {
+        let slot = match cred.get("slot").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let validated = cred
+            .get("lastValidatedAt")
+            .map(|v| !v.is_null())
+            .unwrap_or(false);
+        if validated {
+            continue;
+        }
+        let result = validate_slot(port, &slot);
+        let (valid, reason) = match result {
+            Ok(v) => (
+                v.get("valid").and_then(|x| x.as_bool()).unwrap_or(false),
+                v.get("reason").and_then(|x| x.as_str()).map(String::from),
+            ),
+            Err(e) => (false, Some(e)),
+        };
+        let _ = app.emit(
+            "ray:credentials-changed",
+            serde_json::json!({ "slot": slot, "valid": valid, "reason": reason }),
+        );
+    }
+}
+
+/// Cria um assistente USER (RF-338) — persiste no banco via sidecar.
+#[tauri::command]
+fn create_assistant(
+    name: String,
+    category: String,
+    prompt: String,
+) -> Result<serde_json::Value, String> {
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    if port == 0 {
+        return Err("sidecar not started".into());
+    }
+    let body = serde_json::json!({
+        "userId": "local",
+        "name": name,
+        "category": category,
+        "prompt": prompt,
+    });
+    unwrap_ipc(sidecar_request(port, "POST", "/assistants", Some(body))?)
+}
+
+/// Lista assistentes (BUILTIN + USER) para a biblioteca da UI.
+#[tauri::command]
+fn list_assistants() -> Result<serde_json::Value, String> {
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    if port == 0 {
+        return Err("sidecar not started".into());
+    }
+    unwrap_ipc(sidecar_request(port, "GET", "/assistants", None)?)
+}
+
+// ── helpers locais de parsing de resposta do sidecar ─────────────────────
+
+/// Monta o tray da barra de menu (menu: Mostrar Ray / Capturar Tela / Sair).
+fn build_tray(app: &tauri::AppHandle) -> Result<(), tauri::Error> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::TrayIconBuilder;
+    use tauri::{Emitter, Manager};
+
+    let show = MenuItem::with_id(app, "tray-show", "Mostrar Ray", true, None::<&str>)?;
+    let capture =
+        MenuItem::with_id(app, "tray-capture", "Capturar Tela", true, None::<&str>)?;
+    let settings =
+        MenuItem::with_id(app, "tray-settings", "Configuracoes", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "tray-quit", "Sair do Ray", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &capture, &settings, &quit])?;
+
+    let mut builder = TrayIconBuilder::with_id("ray-tray")
+        .menu(&menu)
+        .tooltip("Ray")
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "tray-show" => {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+            }
+            "tray-settings" => {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+                let _ = app.emit("ray:navigate", serde_json::json!({ "surface": "settings" }));
+            }
+            "tray-capture" => {
+                match capture::capture_screen() {
+                    Ok(image) => {
+                        let _ = app.emit("ray:screen-captured", serde_json::json!({ "image": image }));
+                    }
+                    Err(e) => eprintln!("[ray] captura do tray falhou: {e}"),
+                }
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.show();
+                }
+            }
+            "tray-quit" => app.exit(0),
+            _ => {}
+        });
+
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder.build(app)?;
+    Ok(())
+}
+
+
+#[derive(serde::Deserialize)]
+struct SidecarResp<T> {
+    ok: bool,
+    value: Option<T>,
+    error: Option<SidecarErr>,
+}
+
+#[derive(serde::Deserialize)]
+struct SidecarErr {
+    message: String,
+}
+
+fn parse_sidecar<T: serde::de::DeserializeOwned>(resp: SidecarResp<T>) -> Result<T, String> {
+    if resp.ok {
+        resp.value.ok_or_else(|| "sidecar returned ok without value".to_string())
+    } else {
+        Err(resp.error.map(|e| e.message).unwrap_or_else(|| "sidecar error".to_string()))
+    }
+}
+
+// ── Persistência de credenciais (T-302/T-406) ─────────────────────────────
+
+/// Grava o segredo no cofre nativo e persiste o `ApiKeyRef` no sidecar sem o
+/// segredo (ADR-003). O campo `secret` nunca sai deste handler.
+#[tauri::command]
+fn save_credential(
+    slot: String,
+    kind: ipc::ProviderKind,
+    connection_mode: ipc::ProviderConnectionMode,
+    secret: String,
+    base_url: Option<String>,
+) -> Result<ipc::SaveCredentialResponse, String> {
+    let label = format!("{:?}-{}", kind, slot);
+    let secret_ref = vault::store_secret(&label, &secret).map_err(|e| e.to_string())?;
+
+    let req = ipc::SaveCredentialRequest {
+        slot,
+        kind,
+        connection_mode,
+        label,
+        secret_ref,
+        base_url,
+    };
+
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    if port == 0 {
+        return Err("sidecar not started".into());
+    }
+    let base_url_sidecar = format!("http://127.0.0.1:{}", port);
+
+    let handle = std::thread::spawn(move || -> Result<ipc::SaveCredentialResponse, String> {
+        let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+        rt.block_on(async {
+            let client = reqwest::Client::new();
+            let resp = client
+                .post(format!("{}/credentials", base_url_sidecar))
+                .json(&req)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            let wrapper: SidecarResp<ipc::SaveCredentialResponse> =
+                resp.json().await.map_err(|e| e.to_string())?;
+            parse_sidecar(wrapper)
+        })
+    });
+
+    handle.join().map_err(|_| "thread panicked".to_string())?
+}
+
+/// Remove a credencial do cofre nativo e do banco (via sidecar).
+#[tauri::command]
+fn delete_credential(slot: String) -> Result<(), String> {
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    if port == 0 {
+        return Err("sidecar not started".into());
+    }
+    let base_url = format!("http://127.0.0.1:{}", port);
+
+    let handle = std::thread::spawn(move || -> Result<(), String> {
+        let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+        rt.block_on(async {
+            let client = reqwest::Client::new();
+
+            // 1. Buscar o secretRef do slot no sidecar.
+            let get_resp = client
+                .get(format!("{}/credentials", base_url))
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            let wrapper: SidecarResp<ipc::GetCredentialsResponse> =
+                get_resp.json().await.map_err(|e| e.to_string())?;
+            let creds = parse_sidecar(wrapper)?;
+
+            // 2. Remover do cofre nativo se o slot existir.
+            if let Some(cred) = creds.credentials.iter().find(|c| c.slot == slot) {
+                vault::delete_secret(&cred.secret_ref).ok();
+            }
+
+            // 3. DELETE /credentials no sidecar.
+            let del_req = ipc::DeleteCredentialRequest { slot };
+            let del_resp = client
+                .delete(format!("{}/credentials", base_url))
+                .json(&del_req)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            let del_wrapper: SidecarResp<serde_json::Value> =
+                del_resp.json().await.map_err(|e| e.to_string())?;
+            parse_sidecar(del_wrapper).map(|_| ())
+        })
+    });
+
+    handle.join().map_err(|_| "thread panicked".to_string())?
+}
+
+/// Retorna o status de cada provedor configurado (slot + lastValidatedAt).
+/// Retorna lista vazia se o sidecar não estiver disponível (estado restritivo).
+#[tauri::command]
+fn get_provider_statuses() -> Result<ipc::GetCredentialsResponse, String> {
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    if port == 0 {
+        return Ok(ipc::GetCredentialsResponse { credentials: vec![] });
+    }
+    let base_url = format!("http://127.0.0.1:{}", port);
+
+    let handle = std::thread::spawn(move || -> Result<ipc::GetCredentialsResponse, String> {
+        let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+        rt.block_on(async {
+            let client = reqwest::Client::new();
+            let resp = client
+                .get(format!("{}/credentials", base_url))
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            let wrapper: SidecarResp<ipc::GetCredentialsResponse> =
+                resp.json().await.map_err(|e| e.to_string())?;
+            parse_sidecar(wrapper)
+        })
+    });
+
+    handle.join().map_err(|_| "thread panicked".to_string())?
+}
+
+/// Busca o assistente default (BUILTIN "Assistente Padrao") no sidecar.
+/// A Home e o copiloto precisam de um assistantId real para o SuggestRequest.
+#[tauri::command]
+fn get_default_assistant() -> Result<Option<ipc::AssistantSummary>, String> {
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    if port == 0 {
+        return Err("sidecar not started".into());
+    }
+    let base_url = format!("http://127.0.0.1:{port}");
+
+    let handle = std::thread::spawn(
+        move || -> Result<Option<ipc::AssistantSummary>, String> {
+            let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+            rt.block_on(async {
+                let client = reqwest::Client::new();
+                let resp = client
+                    .get(format!("{base_url}/assistants"))
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let wrapper: SidecarResp<ipc::AssistantList> =
+                    resp.json().await.map_err(|e| e.to_string())?;
+                let list = parse_sidecar(wrapper)?;
+                let assistants = list.assistants;
+                let builtin = assistants
+                    .iter()
+                    .find(|a| a.source == "BUILTIN")
+                    .cloned();
+                Ok(builtin.or_else(|| assistants.into_iter().next()))
+            })
+        },
+    );
+
+    handle.join().map_err(|_| "thread panicked".to_string())?
 }
 
 // ── T-503 commands — logs folder + clipboard export ──────────────────────
@@ -383,6 +1228,363 @@ fn copy_logs_to_clipboard(app: tauri::AppHandle) -> Result<(), String> {
     logging::copy_to_clipboard(&dir)
 }
 
+// ── Atalhos globais (RF-600/RF-603, T-305 runtime) ──────────────────────
+// Registra os defaults do shortcuts.rs como atalhos globais do SO via
+// tauri-plugin-global-shortcut. No macOS exige permissão de Acessibilidade
+// (RF-603): sem ela o registro falha e o core emite um hint à UI.
+
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+
+/// Combo registrado → comando. Preenchido no setup, consultado no handler.
+static SHORTCUT_LOOKUP: std::sync::Mutex<Option<HashMap<Shortcut, ShortcutCommand>>> =
+    std::sync::Mutex::new(None);
+
+/// Primeira credencial persistida no sidecar (mesma seleção do ciclo de
+/// análise automática).
+fn first_credential(port: u16) -> Option<serde_json::Value> {
+    let raw = sidecar_request(port, "GET", "/credentials", None).ok()?;
+    let creds = unwrap_ipc(raw).ok()?;
+    creds
+        .get("credentials")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .cloned()
+}
+
+/// Roda o copiloto a partir de um atalho: monta o SuggestRequest com o
+/// contexto de transcrição acumulado (se houver reunião ativa) e faz o
+/// streaming para o Overlay via `suggest-stream`.
+fn shortcut_suggest(
+    app: &tauri::AppHandle,
+    trigger: ipc::SuggestionTrigger,
+    screenshots: Option<Vec<String>>,
+    user_prompt: Option<String>,
+) {
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    if port == 0 {
+        let _ = app.emit(
+            "ray:analysis-hint",
+            serde_json::json!({ "text": "Serviço de IA ainda não disponível — tente novamente em instantes." }),
+        );
+        return;
+    }
+    let Some(cred) = first_credential(port) else {
+        let _ = app.emit(
+            "ray:analysis-hint",
+            serde_json::json!({ "text": "Configure uma API key em Configurações para usar o copiloto." }),
+        );
+        return;
+    };
+    let (session_id, assistant_id) = {
+        let guard = MEETING.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .as_ref()
+            .map(|m| (m.session_id.clone(), m.assistant_id.clone()))
+            .unwrap_or_else(|| ("sess-shortcut".to_string(), String::new()))
+    };
+    let req = SuggestRequest {
+        session_id,
+        assistant_id,
+        trigger,
+        context: recent_context_segments(12),
+        user_prompt,
+        screenshots,
+        selection_text: None,
+        credential: ipc::InjectedCredential {
+            kind: serde_json::from_value(cred.get("kind").cloned().unwrap_or_default())
+                .unwrap_or(ipc::ProviderKind::Openai),
+            connection_mode: serde_json::from_value(
+                cred.get("connectionMode").cloned().unwrap_or_default(),
+            )
+            .unwrap_or(ipc::ProviderConnectionMode::ApiKey),
+            secret: cred
+                .get("secretRef")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            base_url: cred
+                .get("baseUrl")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            model: None,
+        },
+    };
+    let emitter = TauriEmitter { app: app.clone() };
+    std::thread::spawn(move || {
+        if let Err(e) = suggest_with_stream(port, req, emitter) {
+            eprintln!("[ray] atalho: análise falhou: {e}");
+        }
+    });
+}
+
+/// Ponte atalho global → ação do núcleo (RF-333/RF-706/CA-1).
+/// Comandos de UI (rolagem, notch, opacidade…) são repassados via evento
+/// `ray:shortcut` com o nome da ação.
+fn dispatch_shortcut(app: &tauri::AppHandle, command: ShortcutCommand) {
+    match command {
+        ShortcutCommand::CaptureScreen => {
+            // Garante que o Overlay esteja visível para receber o streaming.
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+            }
+            match capture::capture_screen() {
+                Ok(image) => {
+                    let _ = app.emit(
+                        "ray:screen-captured",
+                        serde_json::json!({ "image": image }),
+                    );
+                    shortcut_suggest(
+                        app,
+                        ipc::SuggestionTrigger::ScreenCapture,
+                        Some(vec![image]),
+                        None,
+                    );
+                }
+                Err(e) => {
+                    eprintln!("[ray] atalho: captura falhou: {e}");
+                    let _ = app.emit(
+                        "ray:analysis-hint",
+                        serde_json::json!({ "text": "Captura de tela falhou — verifique a permissão de Gravação de Tela." }),
+                    );
+                }
+            }
+        }
+        ShortcutCommand::ToggleVoiceRecording => {
+            let active = MEETING
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some();
+            let result = if active {
+                stop_meeting(app.clone()).map(|_| ())
+            } else {
+                start_meeting(app.clone(), String::new()).map(|_| ())
+            };
+            if let Err(e) = result {
+                eprintln!("[ray] atalho: toggle de reunião falhou: {e}");
+            }
+        }
+        ShortcutCommand::AskOrSend => {
+            // RF-331/CA-1: analisa o que foi dito (contexto de transcrição
+            // acumulado) com o prompt do assistente da sessão e responde no
+            // Overlay. Mostra a janela main para o streaming ser visível.
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+            }
+            shortcut_suggest(
+                app,
+                ipc::SuggestionTrigger::AnalyzeConversation,
+                None,
+                None,
+            );
+        }
+        other => {
+            let _ = app.emit(
+                "ray:shortcut",
+                serde_json::json!({ "action": shortcuts::command_to_action_name(other) }),
+            );
+        }
+    }
+}
+
+/// Mapa ativo de atalhos (o que de fato está registrado no SO). Preenchido
+/// por apply_shortcut_map, consultado por get_shortcuts.
+static ACTIVE_SHORTCUTS: std::sync::Mutex<Option<shortcuts::ShortcutMap>> =
+    std::sync::Mutex::new(None);
+
+/// Serializa um ShortcutMap para o shape do contrato (contracts/settings.ts):
+/// { "<commandName>": { "enabled": bool, "modifiers": ["Cmd", …], "key": "E" } | null }.
+fn shortcut_map_to_json(map: &shortcuts::ShortcutMap) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    for (&cmd, binding) in map {
+        let name = shortcuts::command_to_action_name(cmd).to_string();
+        let value = match binding {
+            None => serde_json::Value::Null,
+            Some(b) => {
+                let mods: Vec<&str> = b
+                    .modifiers
+                    .iter()
+                    .map(|m| match m {
+                        shortcuts::ShortcutModifier::Cmd => "Cmd",
+                        shortcuts::ShortcutModifier::Ctrl => "Ctrl",
+                        shortcuts::ShortcutModifier::Alt => "Alt",
+                        shortcuts::ShortcutModifier::Shift => "Shift",
+                    })
+                    .collect();
+                serde_json::json!({ "enabled": b.enabled, "modifiers": mods, "key": b.key })
+            }
+        };
+        obj.insert(name, value);
+    }
+    serde_json::Value::Object(obj)
+}
+
+/// Converte um comando do contrato (camelCase) para o enum.
+fn command_from_name(name: &str) -> Option<ShortcutCommand> {
+    shortcuts::ALL_SHORTCUT_COMMANDS
+        .iter()
+        .copied()
+        .find(|&cmd| shortcuts::command_to_action_name(cmd) == name)
+}
+
+/// Faz o parse do shape do contrato para ShortcutMap. Binds ausentes ou
+/// inválidos herdam o default (o UI editita sobre a base completa).
+fn shortcut_map_from_json(value: serde_json::Value) -> shortcuts::ShortcutMap {
+    let mut map = shortcuts::build_default_shortcuts();
+    let Some(obj) = value.as_object() else {
+        return map;
+    };
+    for (name, binding) in obj {
+        let Some(cmd) = command_from_name(name) else {
+            continue;
+        };
+        if binding.is_null() {
+            map.insert(cmd, None);
+            continue;
+        }
+        let Some(b) = binding.as_object() else { continue };
+        let enabled = b.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+        let key = b
+            .get("key")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let mut modifiers = Vec::new();
+        if let Some(arr) = b.get("modifiers").and_then(|v| v.as_array()) {
+            for m in arr {
+                match m.as_str() {
+                    Some("Cmd") => modifiers.push(shortcuts::ShortcutModifier::Cmd),
+                    Some("Ctrl") => modifiers.push(shortcuts::ShortcutModifier::Ctrl),
+                    Some("Alt") => modifiers.push(shortcuts::ShortcutModifier::Alt),
+                    Some("Shift") => modifiers.push(shortcuts::ShortcutModifier::Shift),
+                    _ => {}
+                }
+            }
+        }
+        if !key.is_empty() {
+            map.insert(
+                cmd,
+                Some(shortcuts::ShortcutBinding {
+                    enabled,
+                    modifiers,
+                    key,
+                }),
+            );
+        }
+    }
+    map
+}
+
+/// Registra um mapa de atalhos no SO (substituindo o que estiver ativo),
+/// atualiza lookup/mapa ativo e devolve a lista de erros por combo.
+/// RF-601/RF-602: validação antes do registro; falha individual não desfaz
+/// os demais (o usuário vê o erro na aba Atalhos e corrige).
+fn apply_shortcut_map(
+    app: &tauri::AppHandle,
+    map: &shortcuts::ShortcutMap,
+) -> Vec<String> {
+    let gs = app.global_shortcut();
+    let _ = gs.unregister_all();
+    let mut lookup = HashMap::new();
+    let mut errors = Vec::new();
+    for (&cmd, binding_opt) in map {
+        let Some(binding) = binding_opt else { continue };
+        if !binding.enabled {
+            continue;
+        }
+        if let Err(e) = shortcuts::validate_binding(binding, cmd, map) {
+            errors.push(format!(
+                "{}: {e}",
+                shortcuts::combo_string(binding)
+            ));
+            continue;
+        }
+        let combo = shortcuts::combo_string(binding);
+        let Ok(shortcut) = combo.parse::<Shortcut>() else {
+            errors.push(format!("{combo}: combo inválido"));
+            continue;
+        };
+        match gs.register(shortcut) {
+            Ok(()) => lookup.insert(shortcut, cmd),
+            Err(e) => {
+                errors.push(format!("{combo}: {e}"));
+                continue;
+            }
+        };
+    }
+    *SHORTCUT_LOOKUP.lock().unwrap_or_else(|e| e.into_inner()) = Some(lookup);
+    *ACTIVE_SHORTCUTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(map.clone());
+    errors
+}
+
+/// Registra os atalhos padrão (RF-604) no SO e popula o lookup do handler.
+/// Falhas individuais não abortam o arranque — sem Acessibilidade no macOS
+/// (RF-603) o app segue funcional pelos botões e pelo tray.
+fn register_global_shortcuts(app: &tauri::AppHandle) {
+    let map = shortcuts::build_default_shortcuts();
+    let errors = apply_shortcut_map(app, &map);
+    if !errors.is_empty() {
+        eprintln!("[ray] atalho: falhas no registro inicial: {errors:?}");
+        let _ = app.emit(
+            "ray:analysis-hint",
+            serde_json::json!({ "text": "Alguns atalhos globais não foram registrados — conceda a permissão de Acessibilidade ao Ray e reinicie o app (RF-603)." }),
+        );
+    }
+}
+
+/// Rearranque dos atalhos a partir do que está persistido no sidecar
+/// (PUT /settings). Roda quando o sidecar fica pronto: o primeiro registro
+/// (setup) usa defaults; este substitui pelo mapa salvo, se houver.
+fn apply_stored_shortcuts(app: &tauri::AppHandle, port: u16) {
+    let Ok(raw) = sidecar_request(port, "GET", "/settings", None) else {
+        return;
+    };
+    let Ok(settings) = unwrap_ipc(raw) else {
+        return;
+    };
+    let Some(shortcuts_json) = settings.get("shortcuts") else {
+        return;
+    };
+    let as_object = shortcuts_json.as_object();
+    if as_object.is_none_or(|o| o.is_empty()) {
+        return; // nada salvo: os defaults do setup permanecem
+    }
+    let map = shortcut_map_from_json(shortcuts_json.clone());
+    let errors = apply_shortcut_map(app, &map);
+    if !errors.is_empty() {
+        eprintln!("[ray] atalho: falhas ao aplicar atalhos salvos: {errors:?}");
+    }
+}
+
+/// Devolve o mapa de atalhos ativo (RF-601 — a aba Atalhos hidrata dele).
+#[tauri::command]
+fn get_shortcuts() -> serde_json::Value {
+    let guard = ACTIVE_SHORTCUTS.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_ref() {
+        Some(map) => shortcut_map_to_json(map),
+        None => shortcut_map_to_json(&shortcuts::build_default_shortcuts()),
+    }
+}
+
+/// Aplica um novo mapa de atalhos (RF-601/RF-602): registra no SO com
+/// efeito imediato e persiste no sidecar. Retorna { errors: [...] } — vazio
+/// é sucesso total; erros individuais não desfaçam os demais registros.
+#[tauri::command]
+fn apply_shortcuts(app: tauri::AppHandle, bindings: serde_json::Value) -> Result<serde_json::Value, String> {
+    let map = shortcut_map_from_json(bindings);
+    let errors = apply_shortcut_map(&app, &map);
+    // Persiste mesmo com erros parciais: os binds válidos são a nova base.
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    if port != 0 {
+        let body = serde_json::json!({ "shortcuts": shortcut_map_to_json(&map) });
+        if let Err(e) = sidecar_request(port, "PUT", "/settings", Some(body)) {
+            eprintln!("[ray] atalho: falha ao persistir: {e}");
+        }
+    }
+    let _ = app.emit("ray:shortcuts-changed", shortcut_map_to_json(&map));
+    Ok(serde_json::json!({ "errors": errors }))
+}
+
 /// Ponto de entrada da aplicação Tauri.
 /// Registra os comandos Tauri. O sidecar é inicializado separadamente
 /// via `sidecar::Sidecar::start()` + `set_sidecar_port()`.
@@ -394,7 +1596,50 @@ pub fn run() {
     tauri::Builder::default()
         // T-502: plugin de auto-update assinado (RID-4 / ADR-009).
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // RF-600/RF-603: atalhos globais do SO — operam com o app sem foco.
+        // O dispatch real vive em dispatch_shortcut (núcleo) — o handler só
+        // resolve o combo → comando e age no keypress (ignora o release).
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    if event.state != ShortcutState::Pressed {
+                        return;
+                    }
+                    let command = SHORTCUT_LOOKUP
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_ref()
+                        .and_then(|lookup| lookup.get(shortcut).copied());
+                    if let Some(command) = command {
+                        dispatch_shortcut(app, command);
+                    }
+                })
+                .build(),
+        )
+        // O X vermelho da janela main destroi a WebviewWindow — depois disso
+        // show_window nao consegue reabri-la (webview desvinculada). Intercepta
+        // o close e esconde a janela, preservando a webview para reabertura.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
+            // LSUIElement (Info.plist) tira o app da Dock; o Accessory policy
+            // garante o mesmo em `cargo run` (fora do bundle).
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // Tray na barra de menu: presenca permanente do app sem Dock.
+            build_tray(app.handle())?;
+
+            // RF-604: registra os atalhos padrão (⌘E captura, ⌘D reunião…).
+            // Requer Acessibilidade no macOS (RF-603) — falhas não abortam.
+            register_global_shortcuts(app.handle());
+
             windows::init_registry();
             windows::init_app_handle(app.handle().clone());
             // macOS: janela sem decoracoes nao e movivel por padrao.
@@ -402,6 +1647,46 @@ pub fn run() {
             if let Some(appbar) = app.get_webview_window("appbar") {
                 windows::enable_movable_by_background(&appbar);
             }
+            // Stealth ativo por padrao: o uso completo e o default e as
+            // janelas nascem fora da captura de tela (ADR-008).
+            for label in ["appbar", "main", "notch"] {
+                if app.get_webview_window(label).is_some() {
+                    windows::set_capture_excluded(label, true);
+                }
+            }
+            // Sidecar (T-300/ADR-005): spawn em background com o banco SQLite
+            // no app data dir. A porta registrada libera os comandos que
+            // delegam ao sidecar (suggest/credentials/sessions).
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                use tauri::{Emitter, Manager};
+                let db_dir = match handle.path().app_data_dir() {
+                    Ok(dir) => dir,
+                    Err(e) => {
+                        eprintln!("[ray] app_data_dir indisponivel: {e}");
+                        return;
+                    }
+                };
+                if let Err(e) = std::fs::create_dir_all(&db_dir) {
+                    eprintln!("[ray] falha ao criar app data dir: {e}");
+                    return;
+                }
+                let db_path = db_dir.join("ray.db");
+                match sidecar::Sidecar::start(db_path).await {
+                    Ok(s) => {
+                        set_sidecar_port(s.port);
+                        eprintln!("[ray] sidecar pronto na porta {}", s.port);
+                        // Valida pendências (chaves salvas antes da validação
+                        // automática existir) e notifica a UI.
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        validate_pending_credentials(&handle, s.port);
+                        // Atalhos persistidos (RF-601): substitui os defaults
+                        // registrados no setup pelo mapa salvo no sidecar.
+                        apply_stored_shortcuts(&handle, s.port);
+                    }
+                    Err(e) => eprintln!("[ray] sidecar falhou ao iniciar: {e}"),
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -409,10 +1694,35 @@ pub fn run() {
             toggle_window,
             show_window,
             hide_window,
+            set_window_opacity,
+            set_always_on_top,
+            get_meter_levels,
+            toggle_mic_capture,
+            show_notch,
             suggest,
             transcribe_pending_pcm,
             open_logs_folder,
             copy_logs_to_clipboard,
+            save_credential,
+            delete_credential,
+            get_provider_statuses,
+            get_default_assistant,
+            start_meeting,
+            stop_meeting,
+            validate_credential,
+            create_assistant,
+            list_assistants,
+            list_sessions,
+            get_session,
+            get_app_settings,
+            save_feature_toggles,
+            get_shortcuts,
+            apply_shortcuts,
+            permissions::get_permission_status,
+            permissions::request_permission,
+            permissions::request_all_permissions,
+            permissions::open_permission_settings,
+            capture::capture_screen,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Ray");
