@@ -45,6 +45,7 @@ const SHORTCUT_LABELS: Record<string, string> = {
   captureScreen: 'Capturar Tela',
   toggleVoiceRecording: 'Gravação de Voz',
   toggleMicCapture: 'Alternar Captura do Microfone',
+  pushToListen: 'Ouvir Segurando (solte para analisar)',
   scrollUp: 'Rolar Cima',
   scrollDown: 'Rolar Baixo',
   notchPreviousInsight: 'Insight Anterior do Notch',

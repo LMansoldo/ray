@@ -1340,12 +1340,23 @@ fn shortcut_suggest(
         );
         return;
     };
+    // Sessão para o request: reunião contínua > sessão do push-to-listen >
+    // placeholder. Assim a análise disparada ao soltar o push-to-listen fica
+    // ligada à sessão onde o trecho foi persistido.
     let (session_id, assistant_id) = {
-        let guard = MEETING.lock().unwrap_or_else(|e| e.into_inner());
-        guard
-            .as_ref()
-            .map(|m| (m.session_id.clone(), m.assistant_id.clone()))
-            .unwrap_or_else(|| ("sess-shortcut".to_string(), String::new()))
+        let meeting_guard = MEETING.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(m) = meeting_guard.as_ref() {
+            (m.session_id.clone(), m.assistant_id.clone())
+        } else {
+            drop(meeting_guard);
+            let ptt_guard = PTT_SESSION.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                ptt_guard
+                    .clone()
+                    .unwrap_or_else(|| "sess-shortcut".to_string()),
+                String::new(),
+            )
+        }
     };
     let req = SuggestRequest {
         session_id,
@@ -1379,6 +1390,155 @@ fn shortcut_suggest(
         if let Err(e) = suggest_with_stream(port, req, emitter) {
             eprintln!("[ray] atalho: análise falhou: {e}");
         }
+    });
+}
+
+/// Sessão persistente do modo push-to-listen: criada no primeiro segurar e
+/// reutilizada — os trechos transcritos se acumulam nela como uma reunião.
+static PTT_SESSION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// True enquanto o atalho push-to-listen está pressionado.
+static PTT_HOLDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Modo push-to-listen (RF-604): captura o áudio da conversa APENAS enquanto
+/// o atalho está pressionado; ao soltar, para os streams (a RAM de captura
+/// sai no instante do soltar), transcreve o trecho acumulado e dispara a
+/// análise do agente — o resultado faz streaming para o Overlay flutuante.
+/// É o caminho leve para quem não quer gravação contínua: nada de loop de
+/// STT, captura dupla ou ciclo de screenshots rodando o tempo todo.
+fn dispatch_push_to_listen(app: &tauri::AppHandle, pressed: bool) {
+    if pressed {
+        ptt_start_hold(app);
+    } else {
+        ptt_release(app);
+    }
+}
+
+/// Pressionou: garante sessão e liga a captura dupla (microfone + sistema).
+fn ptt_start_hold(app: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    // Key repeat do SO dispara Pressed várias vezes — só a primeira liga.
+    if PTT_HOLDING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    // Reunião contínua ativa: ela é dona das filas/streams — não disputar.
+    if MEETING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some()
+    {
+        PTT_HOLDING.store(false, Ordering::SeqCst);
+        let _ = app.emit(
+            "ray:analysis-hint",
+            serde_json::json!({ "text": "Reunião contínua ativa — encerre-a (⌘D) para usar o modo push-to-listen." }),
+        );
+        return;
+    }
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    if port == 0 {
+        PTT_HOLDING.store(false, Ordering::SeqCst);
+        let _ = app.emit(
+            "ray:analysis-hint",
+            serde_json::json!({ "text": "Serviço de IA ainda não disponível — tente novamente em instantes." }),
+        );
+        return;
+    }
+    // Sessão persistente do modo (criada no primeiro uso, reutilizada).
+    {
+        let mut guard = PTT_SESSION.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            match sidecar_request(
+                port,
+                "POST",
+                "/sessions/start",
+                Some(serde_json::json!({ "userId": "local" })),
+            ) {
+                Ok(resp) => match unwrap_ipc(resp) {
+                    Ok(v) => {
+                        *guard = v
+                            .get("sessionId")
+                            .and_then(|s| s.as_str())
+                            .map(String::from);
+                    }
+                    Err(e) => eprintln!("[ray] push-to-listen: sessão: {e}"),
+                },
+                Err(e) => eprintln!("[ray] push-to-listen: sessão: {e}"),
+            }
+            if guard.is_none() {
+                // Sem sessão não há onde anexar a transcrição do trecho.
+                PTT_HOLDING.store(false, Ordering::SeqCst);
+                let _ = app.emit(
+                    "ray:analysis-hint",
+                    serde_json::json!({ "text": "Não foi possível iniciar a sessão de escuta — verifique os logs." }),
+                );
+                return;
+            }
+        }
+    }
+    // Captura só enquanto segurando: VOCÊ (microfone) + OUTROS (sistema).
+    audio::start_capture("default");
+    if !audio::start_system_capture() {
+        let _ = app.emit(
+            "ray:analysis-hint",
+            serde_json::json!({ "text": "Sem áudio da reunião (OUTROS): instale o BlackHole (brew install --cask blackhole-2ch) e inclua-o num Multi-Output Device. O microfone segue sendo ouvido." }),
+        );
+    }
+    let _ = app.emit(
+        "ray:analysis-hint",
+        serde_json::json!({ "text": "Ouvindo… solte o atalho para o Ray analisar." }),
+    );
+}
+
+/// Soltou: desliga a captura, transcreve o trecho (Self + Others) e dispara
+/// a análise do agente com o contexto atualizado.
+fn ptt_release(app: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    if !PTT_HOLDING.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    // Para os streams JÁ no handler do atalho: buffers do cpal e filas de
+    // PCM param de crescer no instante do soltar.
+    audio::stop_capture();
+
+    let app_t = app.clone();
+    std::thread::spawn(move || {
+        // Transcrever pode bloquear segundos (o resultado final do Apple
+        // Speech tem timeout) — por isso FORA do handler do atalho.
+        let Some(session_id) =
+            PTT_SESSION.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        else {
+            return;
+        };
+        let port = SIDECAR_PORT.load(Ordering::Acquire);
+        for (speaker, label) in [
+            (ipc::Speaker::Self_, "self"),
+            (ipc::Speaker::Others, "others"),
+        ] {
+            let mut requests =
+                stt::drain_and_process(speaker.clone(), &session_id).unwrap_or_default();
+            if let Ok(mut rest) = stt::finalize_transcription(speaker.clone(), &session_id) {
+                requests.append(&mut rest);
+            }
+            for req in requests {
+                push_context(label, req.text.clone());
+                let _ = app_t.emit(
+                    "ray:transcript",
+                    serde_json::json!({ "speaker": label, "text": req.text }),
+                );
+                if port != 0 {
+                    post_transcript(port, &session_id, &req);
+                }
+            }
+        }
+        // O trecho recém-transcrito são os ÚLTIMOS segmentos do contexto —
+        // é exatamente o que o agente analisa.
+        shortcut_suggest(
+            &app_t,
+            ipc::SuggestionTrigger::AnalyzeConversation,
+            None,
+            None,
+        );
     });
 }
 
@@ -1442,6 +1602,10 @@ fn dispatch_shortcut(app: &tauri::AppHandle, command: ShortcutCommand) {
                 None,
                 None,
             );
+        }
+        ShortcutCommand::PushToListen => {
+            // Tratado por dispatch_push_to_listen no handler (pressed E
+            // released) — braço explícito para não vazar ray:shortcut à UI.
         }
         other => {
             let _ = app.emit(
@@ -1663,19 +1827,23 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         // RF-600/RF-603: atalhos globais do SO — operam com o app sem foco.
         // O dispatch real vive em dispatch_shortcut (núcleo) — o handler só
-        // resolve o combo → comando e age no keypress (ignora o release).
+        // resolve o combo → comando e age no keypress (ignora o release),
+        // EXCETO o push-to-listen, que age nos DOIS estados: captura no
+        // pressionar; transcreve e dispara a análise no soltar.
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
-                    if event.state != ShortcutState::Pressed {
-                        return;
-                    }
                     let command = SHORTCUT_LOOKUP
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .as_ref()
                         .and_then(|lookup| lookup.get(shortcut).copied());
-                    if let Some(command) = command {
+                    let Some(command) = command else {
+                        return;
+                    };
+                    if command == ShortcutCommand::PushToListen {
+                        dispatch_push_to_listen(app, event.state == ShortcutState::Pressed);
+                    } else if event.state == ShortcutState::Pressed {
                         dispatch_shortcut(app, command);
                     }
                 })

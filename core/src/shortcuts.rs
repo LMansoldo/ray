@@ -35,6 +35,10 @@ pub enum ShortcutCommand {
     CaptureScreen,
     ToggleVoiceRecording,
     ToggleMicCapture,
+    /// Push-to-listen (RF-604): captura só enquanto pressionado; ao soltar,
+    /// transcreve o trecho e dispara a análise do agente. É o único comando
+    /// com comportamento no keypress E no release.
+    PushToListen,
     ScrollUp,
     ScrollDown,
     NotchPreviousInsight,
@@ -60,12 +64,13 @@ pub type ShortcutMap = HashMap<ShortcutCommand, Option<ShortcutBinding>>;
 /// Teclas unicas permitidas sem modificador (contracts/settings.ts:75).
 pub const ALLOWED_MODIFIERLESS_KEYS: &[&str] = &["CapsLock"];
 
-/// Todos os 19 comandos de atalho (contracts/settings.ts:84-104).
+/// Todos os 20 comandos de atalho (contracts/settings.ts:84-104).
 pub const ALL_SHORTCUT_COMMANDS: &[ShortcutCommand] = &[
     ShortcutCommand::AskOrSend,
     ShortcutCommand::CaptureScreen,
     ShortcutCommand::ToggleVoiceRecording,
     ShortcutCommand::ToggleMicCapture,
+    ShortcutCommand::PushToListen,
     ShortcutCommand::ScrollUp,
     ShortcutCommand::ScrollDown,
     ShortcutCommand::NotchPreviousInsight,
@@ -228,6 +233,7 @@ pub fn command_to_action_name(command: ShortcutCommand) -> &'static str {
         ShortcutCommand::CaptureScreen => "captureScreen",
         ShortcutCommand::ToggleVoiceRecording => "toggleVoiceRecording",
         ShortcutCommand::ToggleMicCapture => "toggleMicCapture",
+        ShortcutCommand::PushToListen => "pushToListen",
         ShortcutCommand::ScrollUp => "scrollUp",
         ShortcutCommand::ScrollDown => "scrollDown",
         ShortcutCommand::NotchPreviousInsight => "notchPreviousInsight",
@@ -341,6 +347,12 @@ pub fn build_default_shortcuts() -> ShortcutMap {
             ShortcutCommand::ToggleMicCapture,
             vec![ShortcutModifier::Cmd, ShortcutModifier::Shift],
             "D",
+        ),
+        // Push-to-listen (RF-604): Alt+Espaço, sem conflito com os demais.
+        (
+            ShortcutCommand::PushToListen,
+            vec![ShortcutModifier::Alt],
+            "Space",
         ),
         (ShortcutCommand::ScrollUp, vec![ShortcutModifier::Cmd], "ArrowUp"),
         (
@@ -800,6 +812,7 @@ mod tests {
                 ShortcutCommand::CaptureScreen => "captureScreen",
                 ShortcutCommand::ToggleVoiceRecording => "toggleVoiceRecording",
                 ShortcutCommand::ToggleMicCapture => "toggleMicCapture",
+                ShortcutCommand::PushToListen => "pushToListen",
                 ShortcutCommand::ScrollUp => "scrollUp",
                 ShortcutCommand::ScrollDown => "scrollDown",
                 ShortcutCommand::NotchPreviousInsight => "notchPreviousInsight",
@@ -825,11 +838,11 @@ mod tests {
     }
 
     #[test]
-    fn all_commands_count_is_19() {
+    fn all_commands_count_is_20() {
         assert_eq!(
             ALL_SHORTCUT_COMMANDS.len(),
-            19,
-            "must have exactly 19 shortcut commands per contracts/settings.ts"
+            20,
+            "must have exactly 20 shortcut commands per contracts/settings.ts"
         );
     }
 
@@ -935,11 +948,11 @@ mod tests {
 
         // Registrar antigo limpo, novos defaults registrados
         let registered = mock.registered_combos();
-        // 16 bindings padrao devem ter sido registrados
+        // 17 bindings padrao devem ter sido registrados
         assert_eq!(
             registered.len(),
-            16,
-            "must register 16 default bindings after reset"
+            17,
+            "must register 17 default bindings after reset"
         );
     }
 
@@ -953,8 +966,8 @@ mod tests {
 
         assert_eq!(
             map.len(),
-            19,
-            "reset_to_defaults must produce a 19-entry map"
+            20,
+            "reset_to_defaults must produce a 20-entry map"
         );
 
         // 3 null bindings

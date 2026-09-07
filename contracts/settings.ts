@@ -86,6 +86,7 @@ export const SHORTCUT_COMMANDS = [
   "captureScreen", // Capturar Tela (padrão: Cmd+E)
   "toggleVoiceRecording", // Gravação de Voz (padrão: Cmd+D)
   "toggleMicCapture", // Alternar Captura do Microfone (padrão: Cmd+Shift+D)
+  "pushToListen", // Ouvir Segurando: captura só enquanto pressionado; soltar transcreve e dispara a análise (padrão: Alt+Space)
   "scrollUp", // Rolar Cima (padrão: Cmd+ArrowUp)
   "scrollDown", // Rolar Baixo (padrão: Cmd+ArrowDown)
   "notchPreviousInsight", // Insight Anterior do Notch (padrão: Cmd+ArrowLeft)
@@ -135,6 +136,7 @@ export const DEFAULT_SHORTCUTS: ShortcutMap = {
   captureScreen: { enabled: true, modifiers: ["Cmd"], key: "E" },
   toggleVoiceRecording: { enabled: true, modifiers: ["Cmd"], key: "D" },
   toggleMicCapture: { enabled: true, modifiers: ["Cmd", "Shift"], key: "D" },
+  pushToListen: { enabled: true, modifiers: ["Alt"], key: "Space" },
   scrollUp: { enabled: true, modifiers: ["Cmd"], key: "ArrowUp" },
   scrollDown: { enabled: true, modifiers: ["Cmd"], key: "ArrowDown" },
   notchPreviousInsight: { enabled: true, modifiers: ["Cmd"], key: "ArrowLeft" },
