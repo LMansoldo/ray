@@ -9,6 +9,7 @@
 
 #include "ray_driver.h"
 #include <CoreFoundation/CFPlugInCOM.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +42,14 @@ static OSStatus RayDriver_GetPropertyDataSize(AudioServerPlugInDriverRef inDrive
 
 static UInt32 gRefCount = 1;
 
+// Instancia-handle do driver (definida junto da tabela, la embaixo): o
+// HAL espera da fabrica um ponteiro cujo primeiro campo aponta para a
+// AudioServerPlugInDriverInterface.
+struct RayAudioDriverInstance {
+    AudioServerPlugInDriverInterface *interface;
+};
+static struct RayAudioDriverInstance gDriverInstance;
+
 static HRESULT RayDriver_QueryInterface(void *inDriver, REFIID inUUID, LPVOID *outInterface)
 {
     CFUUIDRef requested;
@@ -53,7 +62,7 @@ static HRESULT RayDriver_QueryInterface(void *inDriver, REFIID inUUID, LPVOID *o
         CFRelease(requested);
     }
     if (matches) {
-        *outInterface = &gDriverInterface;
+        *outInterface = &gDriverInstance;
         return kAudioHardwareNoError;
     }
     *outInterface = NULL;
@@ -237,9 +246,28 @@ static OSStatus RayDriver_GetPlugInPropertyData(const AudioObjectPropertyAddress
             return RayDriver_GetUInt32(kAudioPlugInClassID, inDataSize, outDataSize, outData);
         case kAudioObjectPropertyManufacturer:
             return RayDriver_GetCFString(kRayManufacturer, inDataSize, outDataSize, outData);
+        case kAudioObjectPropertyOwnedObjects:
+            // Como o HAL descobre os devices do plugin: a lista de objetos
+            // pertencentes ao plug-in e o proprio dispositivo. Sem este
+            // caso, o dispositivo nunca e enumerado.
+            return RayDriver_GetUInt32(kRayDeviceObjectID, inDataSize, outDataSize, outData);
+        case kAudioObjectPropertyCustomPropertyInfoList:
+        case kAudioPlugInPropertyBoxList:
+        case kAudioPlugInPropertyClockDeviceList:
+            // Listas vazias validas (sem propriedades custom, sem boxes,
+            // sem clock devices): responder UnknownProperty aqui faz o HAL
+            // moderno descartar a enumeracao do device.
+            *outDataSize = 0;
+            return kAudioHardwareNoError;
         case kAudioPlugInPropertyResourceBundle:
-            // sem bundle de recursos separado: o proprio bundle e o recurso
-            return RayDriver_GetCFString(CFSTR(""), inDataSize, outDataSize, outData);
+            // sem bundle de recursos separado: CFURLRef NULL (o contrato
+            // pede URL; retornar CFString aqui confunde o HAL)
+            if (inDataSize < sizeof(CFURLRef)) {
+                return kAudioHardwareBadPropertySizeError;
+            }
+            *outDataSize = sizeof(CFURLRef);
+            *(CFURLRef *)outData = NULL;
+            return kAudioHardwareNoError;
         case kAudioPlugInPropertyDeviceList: {
             if (inDataSize < sizeof(AudioObjectID)) {
                 return kAudioHardwareBadPropertySizeError;
@@ -272,8 +300,14 @@ static OSStatus RayDriver_GetPlugInPropertyDataSize(const AudioObjectPropertyAdd
     switch (inAddress->mSelector) {
         case kAudioObjectPropertyBaseClass:
         case kAudioObjectPropertyClass:
+        case kAudioObjectPropertyOwnedObjects:
         case kAudioPlugInPropertyTranslateUIDToDevice:
             *outDataSize = sizeof(AudioObjectID);
+            return kAudioHardwareNoError;
+        case kAudioObjectPropertyCustomPropertyInfoList:
+        case kAudioPlugInPropertyBoxList:
+        case kAudioPlugInPropertyClockDeviceList:
+            *outDataSize = 0;
             return kAudioHardwareNoError;
         case kAudioObjectPropertyManufacturer:
         case kAudioPlugInPropertyResourceBundle:
@@ -357,6 +391,14 @@ static OSStatus RayDriver_GetDevicePropertyData(const AudioObjectPropertyAddress
             *(AudioObjectID *)outData = kRayInputStreamID;
             return kAudioHardwareNoError;
         }
+        case kAudioObjectPropertyControlList:
+        case kAudioObjectPropertyCustomPropertyInfoList:
+            // Dispositivo sem controles (sem volume/mute proprios) e sem
+            // propriedades custom: listas VAZIAS validas. Responder
+            // UnknownProperty no ControlList faz o HAL abortar o "add
+            // device" com excecao (HALS_PlugIn.cpp:1441).
+            *outDataSize = 0;
+            return kAudioHardwareNoError;
         case kAudioDevicePropertyStreams: {
             if (scope == kAudioObjectPropertyScopeInput) {
                 return RayDriver_GetUInt32(kRayInputStreamID, inDataSize, outDataSize, outData);
@@ -424,6 +466,10 @@ static OSStatus RayDriver_GetDevicePropertyDataSize(const AudioObjectPropertyAdd
             *outDataSize = RayDriver_StreamConfigurationByteSize(
                 (scope == kAudioObjectPropertyScopeInput) ? 1 : 0);
             return kAudioHardwareNoError;
+        case kAudioObjectPropertyControlList:
+        case kAudioObjectPropertyCustomPropertyInfoList:
+            *outDataSize = 0;
+            return kAudioHardwareNoError;
         default:
             return kAudioHardwareUnknownPropertyError;
     }
@@ -465,6 +511,26 @@ static OSStatus RayDriver_GetStreamPropertyData(const AudioObjectPropertyAddress
             return RayDriver_GetASBD(&kInputFormat, inDataSize, outDataSize, outData);
         case kAudioStreamPropertyPhysicalFormat:
             return RayDriver_GetASBD(&kInputFormat, inDataSize, outDataSize, outData);
+        case kAudioObjectPropertyCustomPropertyInfoList:
+            *outDataSize = 0;
+            return kAudioHardwareNoError;
+        case kAudioStreamPropertyAvailableVirtualFormats:
+        case kAudioStreamPropertyAvailablePhysicalFormats: {
+            // macOS 26: o HAL aborta a enumeracao do device se o stream nao
+            // listar os formatos disponiveis ('sfma'/'pfta' — um unico
+            // formato fixo, taxa unica).
+            AudioStreamRangedDescription range;
+            memset(&range, 0, sizeof(range));
+            range.mFormat = kInputFormat;
+            range.mSampleRateRange.mMinimum = kRaySampleRate;
+            range.mSampleRateRange.mMaximum = kRaySampleRate;
+            if (inDataSize < sizeof(range)) {
+                return kAudioHardwareBadPropertySizeError;
+            }
+            *outDataSize = sizeof(range);
+            memcpy(outData, &range, sizeof(range));
+            return kAudioHardwareNoError;
+        }
         default:
             return kAudioHardwareUnknownPropertyError;
     }
@@ -494,6 +560,13 @@ static OSStatus RayDriver_GetStreamPropertyDataSize(const AudioObjectPropertyAdd
         case kAudioStreamPropertyVirtualFormat:
         case kAudioStreamPropertyPhysicalFormat:
             *outDataSize = sizeof(AudioStreamBasicDescription);
+            return kAudioHardwareNoError;
+        case kAudioStreamPropertyAvailableVirtualFormats:
+        case kAudioStreamPropertyAvailablePhysicalFormats:
+            *outDataSize = sizeof(AudioStreamRangedDescription);
+            return kAudioHardwareNoError;
+        case kAudioObjectPropertyCustomPropertyInfoList:
+            *outDataSize = 0;
             return kAudioHardwareNoError;
         default:
             return kAudioHardwareUnknownPropertyError;
@@ -544,16 +617,19 @@ static OSStatus RayDriver_GetPropertyDataSize(AudioServerPlugInDriverRef inDrive
 {
     (void)inDriver;
     (void)inClientProcessID;
+    OSStatus _rs = kAudioHardwareBadObjectError;
     switch (inObjectID) {
         case kAudioObjectPlugInObject:
-            return RayDriver_GetPlugInPropertyDataSize(inAddress, inQualifierDataSize, inQualifierData, outDataSize);
+            _rs = RayDriver_GetPlugInPropertyDataSize(inAddress, inQualifierDataSize, inQualifierData, outDataSize);
+            break;
         case kRayDeviceObjectID:
-            return RayDriver_GetDevicePropertyDataSize(inAddress, inQualifierDataSize, inQualifierData, outDataSize);
+            _rs = RayDriver_GetDevicePropertyDataSize(inAddress, inQualifierDataSize, inQualifierData, outDataSize);
+            break;
         case kRayInputStreamID:
-            return RayDriver_GetStreamPropertyDataSize(inAddress, inQualifierDataSize, inQualifierData, outDataSize);
-        default:
-            return kAudioHardwareBadObjectError;
+            _rs = RayDriver_GetStreamPropertyDataSize(inAddress, inQualifierDataSize, inQualifierData, outDataSize);
+            break;
     }
+    return _rs;
 }
 
 static OSStatus RayDriver_GetPropertyData(AudioServerPlugInDriverRef inDriver,
@@ -568,19 +644,22 @@ static OSStatus RayDriver_GetPropertyData(AudioServerPlugInDriverRef inDriver,
 {
     (void)inDriver;
     (void)inClientProcessID;
+    OSStatus _rd = kAudioHardwareBadObjectError;
     switch (inObjectID) {
         case kAudioObjectPlugInObject:
-            return RayDriver_GetPlugInPropertyData(inAddress, inQualifierDataSize, inQualifierData,
-                                                   inDataSize, outDataSize, outData);
+            _rd = RayDriver_GetPlugInPropertyData(inAddress, inQualifierDataSize, inQualifierData,
+                                                  inDataSize, outDataSize, outData);
+            break;
         case kRayDeviceObjectID:
-            return RayDriver_GetDevicePropertyData(inAddress, inQualifierDataSize, inQualifierData,
-                                                   inDataSize, outDataSize, outData);
+            _rd = RayDriver_GetDevicePropertyData(inAddress, inQualifierDataSize, inQualifierData,
+                                                  inDataSize, outDataSize, outData);
+            break;
         case kRayInputStreamID:
-            return RayDriver_GetStreamPropertyData(inAddress, inQualifierDataSize, inQualifierData,
-                                                   inDataSize, outDataSize, outData);
-        default:
-            return kAudioHardwareBadObjectError;
+            _rd = RayDriver_GetStreamPropertyData(inAddress, inQualifierDataSize, inQualifierData,
+                                                  inDataSize, outDataSize, outData);
+            break;
     }
+    return _rd;
 }
 
 static OSStatus RayDriver_SetPropertyData(AudioServerPlugInDriverRef inDriver,
@@ -742,10 +821,22 @@ static OSStatus RayDriver_EndIOOperation(AudioServerPlugInDriverRef inDriver,
 void *AudioServerPlugInMain(CFAllocatorRef allocator, CFUUIDRef requestedTypeUUID)
 {
     (void)allocator;
-    if (!CFEqual(requestedTypeUUID, kAudioServerPlugInTypeUUID)) {
-        return NULL;
+    // O coreaudiod chama a fabrica com type UUID NULL no pedido padrao;
+    // CFEqual(NULL, ...) e crash e o load do plugin falha em silencio no
+    // log ("Remote driver service was unable to load plug-in"). O guard
+    // espelha as implementacoes de referencia (BlackHole/Apple sample).
+    if (requestedTypeUUID == NULL || CFEqual(requestedTypeUUID, kAudioServerPlugInTypeUUID)) {
+        return &gDriverInstance;
     }
-    return &gDriverInterface;
+    return NULL;
+}
+
+// Fabrica nomeada no CFPlugInFactories do Info.plist: o
+// HALS_RemotePlugInRegistrar do macOS moderno instancia o plugin por essa
+// via (CFPlugIn), nao pelo AudioServerPlugInMain. Mesma assinatura/efeito.
+void *RayAudioDriverFactory(CFAllocatorRef allocator, CFUUIDRef requestedTypeUUID)
+{
+    return AudioServerPlugInMain(allocator, requestedTypeUUID);
 }
 
 AudioServerPlugInDriverInterface gDriverInterface = {
@@ -773,3 +864,8 @@ AudioServerPlugInDriverInterface gDriverInterface = {
     RayDriver_DoIOOperation,
     RayDriver_EndIOOperation,
 };
+
+// Inicializacao tardia (pos-tabela): o handle da fabrica aponta para a
+// tabela de interface no primeiro campo — layout exigido pelo
+// AudioServerPlugInDriverRef (AudioServerPlugInDriverInterface**).
+static struct RayAudioDriverInstance gDriverInstance = { &gDriverInterface };

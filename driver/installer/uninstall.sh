@@ -38,13 +38,28 @@ if [ -n "$TEST_MODE" ]; then
   exit 0
 fi
 
-# desinstalacao real: escalada com senha de administrador (dialogo nativo)
-privileged_command() {
-  printf 'rm -rf "%s/%s" && killall coreaudiod' "$HAL_DIR" "$BUNDLE_NAME"
+# desinstalacao real: escalada com senha de administrador (dialogo nativo).
+# Aspas simples nos caminhos: aspas duplas internas quebrariam a string
+# AppleScript (syntax error -2740) — mesmo bug corrigido no install.sh.
+sh_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
-if ! osascript -e "do shell script \"$(privileged_command)\" with administrator privileges" >/dev/null 2>&1; then
-  echo "Desinstalacao falhou: senha de administrador negada ou operacao cancelada" >&2
+privileged_command() {
+  printf 'rm -rf %s/%s && killall coreaudiod' \
+    "$(sh_quote "$HAL_DIR")" "$BUNDLE_NAME"
+}
+
+osa_error="$(osascript -e "do shell script \"$(privileged_command)\" with administrator privileges" 2>&1 >/dev/null)"
+if [ $? -ne 0 ]; then
+  case "$osa_error" in
+    *"User canceled"*|*-128*)
+      echo "Desinstalacao falhou: operacao cancelada pelo usuario" >&2
+      ;;
+    *)
+      echo "Desinstalacao falhou: $osa_error" >&2
+      ;;
+  esac
   exit 1
 fi
 echo "Desinstalacao concluida: o Ray Audio Driver foi removido do sistema"

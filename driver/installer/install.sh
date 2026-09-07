@@ -91,14 +91,32 @@ if [ -n "$TEST_MODE" ]; then
   exit 0
 fi
 
-# instalacao real: escalada com senha de administrador (dialogo nativo)
-privileged_command() {
-  printf 'mkdir -p "%s" && rm -rf "%s/%s" && cp -R "%s" "%s/%s" && killall coreaudiod' \
-    "$HAL_DIR" "$HAL_DIR" "$BUNDLE_NAME" "$PAYLOAD" "$HAL_DIR" "$BUNDLE_NAME"
+# instalacao real: escalada com senha de administrador (dialogo nativo).
+# Os caminhos usam aspas SIMPLES no shell: aspas duplas internas
+# terminariam a string AppleScript antes da hora (syntax error -2740) e
+# fariam o osascript falhar sem nem pedir a senha.
+sh_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
-if ! osascript -e "do shell script \"$(privileged_command)\" with administrator privileges" >/dev/null 2>&1; then
-  echo "Instalacao falhou: senha de administrador negada ou operacao cancelada" >&2
+privileged_command() {
+  printf 'mkdir -p %s && rm -rf %s/%s && cp -R %s %s/%s && killall coreaudiod' \
+    "$(sh_quote "$HAL_DIR")" "$(sh_quote "$HAL_DIR")" "$BUNDLE_NAME" \
+    "$(sh_quote "$PAYLOAD")" "$(sh_quote "$HAL_DIR")" "$BUNDLE_NAME"
+}
+
+osa_error="$(osascript -e "do shell script \"$(privileged_command)\" with administrator privileges" 2>&1 >/dev/null)"
+if [ $? -ne 0 ]; then
+  case "$osa_error" in
+    *"User canceled"*|*-128*)
+      echo "Instalacao falhou: operacao cancelada pelo usuario" >&2
+      ;;
+    *)
+      # Nunca descartar o erro real: senha invalida, usuario sem admin,
+      # disco cheio etc. chegam aqui com a causa explicita.
+      echo "Instalacao falhou: $osa_error" >&2
+      ;;
+  esac
   exit 1
 fi
 echo "Instalacao concluida: o Ray Audio Driver esta em $HAL_DIR/$BUNDLE_NAME"

@@ -14,6 +14,23 @@
     <string>Ray Audio Driver</string>
     <key>CFBundlePackageType</key>
     <string>BNDL</string>
+    <!-- Registro CFPlugIn exigido pelo HALS_RemotePlugInRegistrar do
+         coreaudiod (macOS moderno): sem fábrica/tipo declarados, o plugin
+         falha o load em silencio ("unable to load plug-in"). O tipo e
+         kAudioServerPlugInTypeUUID
+         (443ABAB8-E7B3-491A-B985-BEB9187030DB, AudioServerPlugIn.h). -->
+    <key>CFPlugInFactories</key>
+    <dict>
+        <key>9C2A17B4-6E58-4F41-B2D7-0A93E5C84F01</key>
+        <string>RayAudioDriverFactory</string>
+    </dict>
+    <key>CFPlugInTypes</key>
+    <dict>
+        <key>443ABAB8-E7B3-491A-B985-BEB9187030DB</key>
+        <array>
+            <string>9C2A17B4-6E58-4F41-B2D7-0A93E5C84F01</string>
+        </array>
+    </dict>
     <key>CFBundleShortVersionString</key>
     <string>0.1.0</string>
     <key>CFBundleVersion</key>

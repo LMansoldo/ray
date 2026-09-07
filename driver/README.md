@@ -1,5 +1,11 @@
 # Ray Audio Driver (macOS)
 
+> **ARQUIVADO (2026-09-06, ADR-012):** o canal OUTROS usa o BlackHole
+> (`brew install --cask blackhole-2ch`). Este driver não é mais instalado pelo
+> app. Estado do código: o plugin carrega no coreaudiod do macOS 26, mas o
+> dispositivo não é enumerado — histórico completo em
+> `docs/HANDOFF-driver-macos26.md`.
+
 Dispositivo virtual de áudio do Ray para macOS: um plugin CoreAudio/HAL
 (bundle `.driver`) que aparece no sistema como **"Ray Audio Driver"** e
 alimenta a fonte **Áudio Recebido** (canal OUTROS, ADR-004/RF-203) dentro do
