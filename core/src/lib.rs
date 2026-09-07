@@ -1387,8 +1387,30 @@ fn shortcut_suggest(
     };
     let emitter = TauriEmitter { app: app.clone() };
     std::thread::spawn(move || {
-        if let Err(e) = suggest_with_stream(port, req, emitter) {
+        use ipc_client::SuggestEventEmitter;
+        if let Err(e) = suggest_with_stream(port, req, emitter.clone()) {
             eprintln!("[ray] atalho: análise falhou: {e}");
+            // Falha SEM stream (vault, HTTP 4xx/5xx, conexão): emite
+            // start+error para o Overlay flutuante abrir e exibir o motivo —
+            // sem isso o atalho falha em silêncio total (nada aparece).
+            emitter.emit_event(ipc::SuggestStreamEvent::Start {
+                suggestion_id: format!(
+                    "err-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0)
+                ),
+                context_label: None,
+                they_said: None,
+            });
+            emitter.emit_event(ipc::SuggestStreamEvent::Error {
+                error: ipc::IpcError {
+                    code: ipc::IpcErrorCode::AgentError,
+                    message: e,
+                    retryable: None,
+                },
+            });
         }
     });
 }
@@ -1548,10 +1570,10 @@ fn ptt_release(app: &tauri::AppHandle) {
 fn dispatch_shortcut(app: &tauri::AppHandle, command: ShortcutCommand) {
     match command {
         ShortcutCommand::CaptureScreen => {
-            // Garante que o Overlay esteja visível para receber o streaming.
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.show();
-            }
+            // A análise faz streaming na janela flutuante do Overlay (ela se
+            // abre com o evento suggest-stream start). A main permanece
+            // oculta (stealth, RF-603) — a captura aparece nela quando o
+            // usuário abrir.
             match capture::capture_screen() {
                 Ok(image) => {
                     let _ = app.emit(
@@ -1591,11 +1613,8 @@ fn dispatch_shortcut(app: &tauri::AppHandle, command: ShortcutCommand) {
         }
         ShortcutCommand::AskOrSend => {
             // RF-331/CA-1: analisa o que foi dito (contexto de transcrição
-            // acumulado) com o prompt do assistente da sessão e responde no
-            // Overlay. Mostra a janela main para o streaming ser visível.
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.show();
-            }
+            // acumulado) e responde no Overlay flutuante — sem abrir a main
+            // (stealth, RF-603).
             shortcut_suggest(
                 app,
                 ipc::SuggestionTrigger::AnalyzeConversation,

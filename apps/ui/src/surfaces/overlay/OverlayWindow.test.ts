@@ -139,6 +139,18 @@ describe('OverlayWindow — janela flutuante do assistente (RF-012)', () => {
     await waitFor(() => expect(hasInvoke('show_overlay')).toBe(true))
   })
 
+  it('erro no stream também abre a janela — falha nunca é silenciosa', async () => {
+    const { container } = render(OverlayWindow)
+    await emit('suggest-stream', {
+      type: 'error',
+      error: { code: 'AGENT_ERROR', message: 'provedor falhou' },
+    })
+    await waitFor(() => expect(hasInvoke('show_overlay')).toBe(true))
+    // O card de insight exibe o estado de erro (o core garante start antes
+    // do error em falhas pré-stream; erros pós-start já têm card aberto).
+    expect(container.querySelector('[data-overlay-window]')).not.toBeNull()
+  })
+
   it('moveModal* move a JANELA por move_window (RF-507) — não há mais transform in-page', async () => {
     render(OverlayWindow)
     await emit('ray:shortcut', { action: 'moveModalLeft' })

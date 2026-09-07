@@ -12,8 +12,10 @@ always-on-top, fora da janela main) — mesmo modelo do Notch e da AppBar. Este
 componente é o root dessa janela e cuida SÓ da gestão de janela:
 
 - Visibilidade: `show_overlay` (reunião iniciada, hint, insight em streaming,
-  stealth-unsupported) e `hide_window` (reunião encerrada). Fora de reunião,
-  conteúdo transitório recolhe após 15s de leitura.
+  **erro no stream**, stealth-unsupported) e `hide_window` (reunião
+  encerrada). Fora de reunião, conteúdo transitório recolhe após 15s de
+  leitura. Falha nunca é silenciosa: o core emite start+error em falhas
+  pré-stream (vault/HTTP) e a janela abre também no error puro.
 - Movimento (RF-507): atalhos `moveModal*` movem a **janela** via
   `move_window` — não existe mais transform in-page.
 - Redimensionamento: um `ResizeObserver` chama `resize_window` com a altura

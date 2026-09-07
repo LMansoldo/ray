@@ -89,11 +89,14 @@
   }
 
   // A janela acompanha o status do stream apenas para visibilidade; a redução
-  // do conteúdo acontece dentro de <Overlay>.
+  // do conteúdo acontece dentro de <Overlay>. Erro também ABRE a janela —
+  // falha invisível é bug (o usuário precisa do motivo).
   function handleStreamEventForVisibility(payload: SuggestStreamEvent): void {
     if (payload.type === 'start') {
       showWindow(true)
-    } else if (payload.type === 'done' || payload.type === 'error') {
+    } else if (payload.type === 'error') {
+      showWindow(true)
+    } else if (payload.type === 'done') {
       armIdleHide()
     }
   }

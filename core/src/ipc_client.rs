@@ -50,10 +50,15 @@ pub async fn post_suggest_to_sidecar(
         .await
         .map_err(|e| IpcClientError::Http(e.to_string()))?;
 
-    if response.status().is_server_error() {
+    // 4xx e 5xx são falhas com retorno visível: o chamador converte o Err em
+    // evento de erro para o Overlay não ficar mudo (ex.: provedor rejeitando
+    // screenshot). Corpo truncado — só diagnóstico.
+    let status = response.status();
+    if status.is_client_error() || status.is_server_error() {
+        let body = response.text().await.unwrap_or_default();
+        let snippet: String = body.chars().take(300).collect();
         return Err(IpcClientError::Http(format!(
-            "sidecar returned {}",
-            response.status()
+            "sidecar returned {status}: {snippet}"
         )));
     }
 
@@ -92,10 +97,15 @@ pub async fn stream_suggest_events<E: SuggestEventEmitter>(
         .await
         .map_err(|e| IpcClientError::Http(e.to_string()))?;
 
-    if response.status().is_server_error() {
+    // 4xx e 5xx são falhas com retorno visível: o chamador converte o Err em
+    // evento de erro para o Overlay não ficar mudo (ex.: provedor rejeitando
+    // screenshot). Corpo truncado — só diagnóstico.
+    let status = response.status();
+    if status.is_client_error() || status.is_server_error() {
+        let body = response.text().await.unwrap_or_default();
+        let snippet: String = body.chars().take(300).collect();
         return Err(IpcClientError::Http(format!(
-            "sidecar returned {}",
-            response.status()
+            "sidecar returned {status}: {snippet}"
         )));
     }
 
