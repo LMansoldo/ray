@@ -331,8 +331,40 @@ Duas camadas, cada uma com sua fonte:
 
 ---
 
+## ADR-012 — Captura de áudio no macOS: BlackHole no lugar do driver próprio
+
+**Status:** Aceito (2026-09-06). Supersedes a parte macOS do ADR-004.
+
+### Contexto
+
+O Ray Audio Driver (T-500) chegou a carregar no coreaudiod do macOS 26, mas o dispositivo nunca é enumerado: o protocolo de propriedades do HAL do Tahoe exige mais do que o contrato documentado (a conversa para após `'ctrl'` vazio, com o HAL perguntando seletores privados como `'siso'`). Cada rodada de diagnóstico exige reinstalação privilegiada e reinício do coreaudiod, e o resultado final — mesmo se concluído — manteria os dois maiores atritos de onboarding: instalação com senha de administrador e configuração manual de Multi-Output Device.
+
+### Decisão
+
+No macOS, o canal OUTROS usa o **BlackHole** (existente, GPL, já suportado pelo fallback de enumeração do core) em vez do driver próprio:
+
+- O hint do app instrui `brew install --cask blackhole-2ch` + Multi-Output Device.
+- A detecção (cpal) casa "blackhole" no nome do dispositivo; "ray audio" permanece como fallback inofensivo.
+- O código do driver fica arquivado no repo (`driver/`), com o plugin carregável mas sem enumeração de device (ver `docs/HANDOFF-driver-macos26.md`).
+
+### Alternativas consideradas
+
+- **Concluir o T-500 (controles de volume/mute no plugin):** rejeitada por ora — protocolo não documentado, ciclo de teste lento e UX final ainda ruim (senha + Multi-Output).
+- **Core Audio Process Taps (macOS 14.4+):** o caminho estratégico de longo prazo — captura sem driver, sem senha e sem Multi-Output, apenas permissão do usuário; requer reescrever a captura do core (FFI). Fica registrado para reavaliação.
+- **libASPL (biblioteca C++17 para AudioServerPlugIn):** resolveria o protocolo, mas manteria os atritos de instalação.
+
+### Consequências
+
+- (+) Elimina a instalação privilegiada do nosso lado — o usuário instala o BlackHole pelo brew, caminho amplamente documentado.
+- (+) Zero manutenção de plugin HAL proprietário contra um alvo (macOS 26) cujo protocolo é opaco.
+- (−) Dependência externa (GPL) — aceitável porque não embutimos o código, apenas detectamos e capturamos do dispositivo.
+- (−) O atrito do Multi-Output Device permanece até a migração para Process Taps.
+
+---
+
 ## Decisões em aberto (para revisitar)
 
 - **Migração de loopback HTTP para socket/pipe** (ADR-005): reavaliar se latência ou isolamento exigirem.
 - **`sqlx` no Rust como plano B** (ADR-002): reavaliar se a persistência via sidecar virar gargalo.
 - **Motor incremental para STT ao vivo** (ADR-007): reavaliar conforme latência observada em Windows/Linux.
+- **Core Audio Process Taps no macOS** (ADR-012): captura de sistema sem driver nenhum (macOS 14.4+); reavaliar como próximo passo da captura de áudio.

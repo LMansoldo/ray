@@ -253,6 +253,7 @@ As tasks estão agrupadas em fases por dependência. Dentro de uma fase, as task
 **Objetivo:** O dispositivo de áudio virtual do macOS e seu instalador privilegiado, versionado à parte (ADR-004/009, RID-5).
 **Dependências:** T-306.
 **Pronto quando:** instalado, aparece como fonte de "Áudio Recebido" só dentro do app; captura o áudio da reunião.
+**Status (2026-09-06): ARQUIVADO (ADR-012).** O plugin carrega no coreaudiod do macOS 26, mas o device nunca é enumerado (protocolo não documentado). O canal OUTROS usa BlackHole (`brew install --cask blackhole-2ch`) — histórico em `docs/HANDOFF-driver-macos26.md`.
 
 ### T-501 · Empacotamento por plataforma + modelo Whisper embarcado
 **Objetivo:** Builds AppImage/.deb (Linux), .dmg (macOS), .msi (Windows), canais stable/unstable; embarcar Whisper nos builds Win/Linux (ADR-009, RID-3/6).

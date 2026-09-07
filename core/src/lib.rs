@@ -643,7 +643,7 @@ fn start_meeting(app: tauri::AppHandle, assistant_id: String) -> Result<String, 
         let _ = app.emit(
             "ray:analysis-hint",
             serde_json::json!({
-                "text": "Sem áudio da reunião (canal OUTROS): instale o Ray Audio Driver (driver/installer/install.sh) e defina a saída do app de reunião para um agregador (Multi-Output Device) que inclua o driver. Alternativa: BlackHole. O microfone continua sendo transcrito."
+                "text": "Sem áudio da reunião (canal OUTROS): instale o BlackHole (brew install --cask blackhole-2ch; reinicie o Mac se não aparecer), crie um Multi-Output Device com os alto-falantes + BlackHole e defina-o como saída do app de reunião. O microfone continua sendo transcrito."
             }),
         );
     }

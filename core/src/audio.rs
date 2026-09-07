@@ -1,5 +1,5 @@
-//! Captura de audio (ADR-004). Canal VOCE (microfone) e canal OUTROS
-//! (audio recebido via loopback/monitor ou Ray Audio Driver no macOS).
+//! Captura de audio (ADR-004/ADR-012). Canal VOCE (microfone) e canal OUTROS
+//! (audio recebido via loopback/monitor — BlackHole no macOS).
 //! TASK: implementar captura por plataforma e enfileiramento de PCM para STT.
 
 use std::collections::VecDeque;
@@ -169,7 +169,7 @@ pub(crate) fn clear_meter_levels() {
 
 /// Flag que indica que o driver de audio nao esta instalado (RF-204).
 /// Definido por list_incoming_sources quando a plataforma nao prove audio
-/// de entrada (ex: macOS sem Ray Audio Driver).
+/// de entrada (ex: macOS sem BlackHole).
 static DRIVER_MISSING_SIGNALED: AtomicBool = AtomicBool::new(false);
 
 /// Retorna se o sinal de driver ausente foi ativado.
@@ -480,21 +480,22 @@ mod system_audio {
 
     static SYSTEM_STREAM: Mutex<Option<cpal::Stream>> = Mutex::new(None);
 
-    /// True se existe um dispositivo loopback instalado (Ray Audio Driver
-    /// preferido — ADR-004/RF-203; BlackHole como fallback).
+    /// True se existe um dispositivo loopback instalado (BlackHole — ADR-012;
+    /// "ray audio" fica como fallback do driver arquivado).
     pub(crate) fn loopback_available() -> bool {
         find_loopback_device().is_some()
     }
 
     fn find_loopback_device() -> Option<cpal::Device> {
         let host = cpal::default_host();
-        // RF-203: o driver do produto tem prioridade sobre third-party.
+        // ADR-012: BlackHole é o caminho suportado no macOS; o driver do
+        // produto (arquivado) continua casando caso volte a carregar.
         let mut fallback = None;
         host.input_devices().ok()?.find(|d| {
             let n = d.to_string().to_lowercase();
-            if n.contains("ray audio") {
+            if n.contains("blackhole") {
                 true
-            } else if n.contains("blackhole") {
+            } else if n.contains("ray audio") {
                 if fallback.is_none() {
                     fallback = Some(d.clone());
                 }
@@ -514,9 +515,9 @@ mod system_audio {
         let Some(device) = find_loopback_device() else {
             eprintln!(
                 "[ray] áudio de sistema (OUTROS): nenhum dispositivo loopback. \
-                Instale o Ray Audio Driver (driver/installer/install.sh) e \
-                inclua-o em um Multi-Output Device com os alto-falantes. \
-                Alternativa: BlackHole (https://existential.audio/blackhole)."
+                Instale o BlackHole (brew install --cask blackhole-2ch; reinicie \
+                o Mac se não aparecer) e inclua-o em um Multi-Output Device com \
+                os alto-falantes."
             );
             return false;
         };
@@ -771,20 +772,20 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn adr004_macos_uses_ray_audio_driver_for_incoming() {
-        // ADR-004: macOS canal OUTROS usa Ray Audio Driver (T-500).
-        // RF-204: driver e fonte de captura, nunca saida.
+    fn adr012_macos_uses_blackhole_loopback_for_incoming() {
+        // ADR-012: macOS canal OUTROS usa o BlackHole (driver próprio
+        // arquivado). RF-204: loopback é fonte de captura, nunca saída.
         let mock = MockBackend {
             input: vec![mic("mic-0", "MacBook Pro Microphone")],
-            incoming: vec![source("ray-audio-driver", "Ray Audio Driver")],
+            incoming: vec![source("blackhole-2ch", "BlackHole 2ch")],
             capture_frames: HashMap::new(),
         };
         install_mock(mock, || {
             let sources = list_incoming_sources();
             assert_eq!(sources.len(), 1, "macOS must have one incoming source");
             assert_eq!(
-                sources[0].name, "Ray Audio Driver",
-                "macOS must use Ray Audio Driver per ADR-004"
+                sources[0].name, "BlackHole 2ch",
+                "macOS must use BlackHole loopback per ADR-012"
             );
         });
     }
