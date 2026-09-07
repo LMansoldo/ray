@@ -54,7 +54,6 @@ export interface HomeProps {
   assistantId: string
   context: TranscriptContextSegment[]
   credential: InjectedCredential
-  screenshots?: string[]
   /** RF-206: exibir medidores de áudio durante a reunião. */
   metersVisible?: boolean
   /** RF-703: aviso "Continuar Gravando?" a cada 30 min de reunião. */
@@ -67,5 +66,4 @@ export interface ConversationActionsProps {
   assistantId: string
   context: TranscriptContextSegment[]
   credential: InjectedCredential
-  screenshots?: string[]
 }

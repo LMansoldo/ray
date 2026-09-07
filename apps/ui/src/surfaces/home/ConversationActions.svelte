@@ -13,7 +13,6 @@
     assistantId,
     context,
     credential,
-    screenshots,
   }: ConversationActionsProps = $props()
 
   let askOpen = $state(false)
@@ -25,10 +24,11 @@
 
   async function captureScreen(): Promise<void> {
     // Captura REAL do display principal no clique (RF-332): o core devolve
-    // o PNG em data URL base64, que passa a ser o contexto visual. Se o core
-    // falhar (permissão negada, sidecar fora), cai para o prop `screenshots`
-    // (ex.: captura prévia via tray).
-    let shots = screenshots
+    // o data URL para uso IMEDIATO no request (o arquivo já persistiu em
+    // app_data/captures). Se a captura ao vivo falhar, cai para a última
+    // captura em disco, lida sob demanda via latest_capture — a UI nunca
+    // retém base64 fora do corpo do request.
+    let shots: string[] | undefined
     try {
       const image = await invoke<unknown>('capture_screen')
       if (typeof image === 'string' && image.startsWith('data:image/')) {
@@ -36,6 +36,13 @@
       }
     } catch (err) {
       console.error('[capture_screen]', err)
+    }
+    if (!shots) {
+      try {
+        shots = [await invoke<string>('latest_capture')]
+      } catch (err) {
+        console.error('[latest_capture]', err)
+      }
     }
     await dispatchSuggest('SCREEN_CAPTURE', { screenshots: shots })
   }

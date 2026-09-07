@@ -822,7 +822,8 @@ fn start_meeting(app: tauri::AppHandle, assistant_id: String) -> Result<String, 
                 .collect();
             // "Ler a tela": captura o display a cada ciclo de análise e
             // envia ao modelo multimodal (junto com o contexto de texto).
-            let screenshots = match crate::capture::capture_screen() {
+            // O arquivo persiste em captures/ e o data URL é transitório.
+            let screenshots = match crate::capture::capture_screen(app_analysis.clone()) {
                 Ok(image) => Some(vec![image]),
                 Err(e) => {
                     eprintln!("[ray] screenshot do ciclo falhou: {e}");
@@ -1075,9 +1076,14 @@ fn build_tray(app: &tauri::AppHandle) -> Result<(), tauri::Error> {
                 let _ = app.emit("ray:navigate", serde_json::json!({ "surface": "settings" }));
             }
             "tray-capture" => {
-                match capture::capture_screen() {
-                    Ok(image) => {
-                        let _ = app.emit("ray:screen-captured", serde_json::json!({ "image": image }));
+                // Persiste em disco e emite só o CAMINHO — base64 de imagem
+                // não é broadcast para as janelas (memória da UI).
+                match capture::captures_dir(app).and_then(|dir| capture::capture_to(&dir)) {
+                    Ok((path, _)) => {
+                        let _ = app.emit(
+                            "ray:screen-captured",
+                            serde_json::json!({ "path": path.to_string_lossy() }),
+                        );
                     }
                     Err(e) => eprintln!("[ray] captura do tray falhou: {e}"),
                 }
@@ -1572,13 +1578,13 @@ fn dispatch_shortcut(app: &tauri::AppHandle, command: ShortcutCommand) {
         ShortcutCommand::CaptureScreen => {
             // A análise faz streaming na janela flutuante do Overlay (ela se
             // abre com o evento suggest-stream start). A main permanece
-            // oculta (stealth, RF-603) — a captura aparece nela quando o
-            // usuário abrir.
-            match capture::capture_screen() {
-                Ok(image) => {
+            // oculta (stealth, RF-603). O evento leva só o CAMINHO em disco:
+            // base64 de imagem não é broadcast para as janelas.
+            match capture::captures_dir(app).and_then(|dir| capture::capture_to(&dir)) {
+                Ok((path, image)) => {
                     let _ = app.emit(
                         "ray:screen-captured",
-                        serde_json::json!({ "image": image }),
+                        serde_json::json!({ "path": path.to_string_lossy() }),
                     );
                     shortcut_suggest(
                         app,
@@ -1978,6 +1984,7 @@ pub fn run() {
             permissions::request_all_permissions,
             permissions::open_permission_settings,
             capture::capture_screen,
+            capture::latest_capture,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Ray");

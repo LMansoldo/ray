@@ -22,7 +22,6 @@
     assistantId,
     context,
     credential,
-    screenshots,
     metersVisible = true,
     sessionTimerEnabled = true,
   }: HomeProps = $props()
@@ -302,7 +301,6 @@
       {assistantId}
       {context}
       {credential}
-      {screenshots}
     />
 
     <section class="home__grid">

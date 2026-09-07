@@ -46,7 +46,6 @@
 
   let surface = $state<Surface>(initialSurface)
   let meetingActive = $state(false)
-  let screenshots = $state<string[]>([])
   let transcript = $state<TranscriptContextSegment[]>([])
   let sessions = $state<SessionSummary[]>([])
 
@@ -163,9 +162,6 @@
     },
     get credential() {
       return { ...credential, model: modelsConfig.ANALYSIS?.model || undefined }
-    },
-    get screenshots() {
-      return screenshots
     },
     get metersVisible() {
       return metersVisible
@@ -322,8 +318,10 @@
       }),
     )
     track(
-      listen<{ image: string }>('ray:screen-captured', (event) => {
-        screenshots = [event.payload.image]
+      listen('ray:screen-captured', () => {
+        // O payload é só o caminho em disco (app_data/captures) — a imagem
+        // em base64 nunca reside na UI; quem precisa dela lê via
+        // latest_capture no ato do request. Aqui: apenas navegar para a Home.
         goTo('home')
       }),
     )

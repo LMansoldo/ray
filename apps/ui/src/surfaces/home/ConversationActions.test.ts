@@ -103,15 +103,12 @@ describe('ConversationActions — ações disparam o comando suggest (RF-333)', 
     expect(req.selectionText).toBeUndefined()
   })
 
-  it('"Capturar Tela" captura ao vivo (capture_screen) e envia o PNG com SCREEN_CAPTURE', async () => {
-    const live = 'data:image/png;base64,Q0FQVFVSQQ=='
+  it('"Capturar Tela" captura ao vivo (capture_screen) e envia o JPEG com SCREEN_CAPTURE', async () => {
+    const live = 'data:image/jpeg;base64,Q0FQVFVSQQ=='
     invokeMock.mockImplementation((command: string) =>
       command === 'capture_screen' ? Promise.resolve(live) : Promise.resolve(undefined),
     )
-    const stale = ['data:image/png;base64,AAAA']
-    const { getByRole } = render(ConversationActions, {
-      props: { ...baseProps, screenshots: stale },
-    })
+    const { getByRole } = render(ConversationActions, { props: baseProps })
     await fireEvent.click(getByRole('button', { name: 'Capturar Tela' }))
 
     // 1º invoke: capture_screen (captura ao vivo); 2º: suggest.
@@ -119,20 +116,39 @@ describe('ConversationActions — ações disparam o comando suggest (RF-333)', 
     expect(invokeMock).toHaveBeenNthCalledWith(1, 'capture_screen')
     const req = lastSuggestPayload()
     expect(req.trigger).toBe('SCREEN_CAPTURE')
-    // A captura ao vivo substitui o prop desatualizado.
     expect(req.screenshots).toEqual([live])
     expect(req.userPrompt).toBeUndefined()
   })
 
-  it('"Capturar Tela" sem captura disponível cai para o prop e omite screenshots se vazio', async () => {
-    // capture_screen rejeita (ex.: Screen Recording negado) — fallback ao prop.
+  it('"Capturar Tela" com falha ao vivo lê a última captura do DISCO (latest_capture) sob demanda', async () => {
+    // capture_screen rejeita (ex.: Screen Recording negado) — o fallback é
+    // a captura persistida em app_data/captures, lida SÓ agora (nada de
+    // base64 residente na UI).
+    const stored = 'data:image/jpeg;base64,QU5URVJJT1I='
     invokeMock.mockImplementation((command: string) =>
-      command === 'capture_screen' ? Promise.reject(new Error('denied')) : Promise.resolve(undefined),
+      command === 'capture_screen'
+        ? Promise.reject(new Error('denied'))
+        : command === 'latest_capture'
+          ? Promise.resolve(stored)
+          : Promise.resolve(undefined),
     )
     const { getByRole } = render(ConversationActions, { props: baseProps })
     await fireEvent.click(getByRole('button', { name: 'Capturar Tela' }))
 
-    expect(invokeMock).toHaveBeenCalledTimes(2)
+    expect(invokeMock).toHaveBeenCalledWith('latest_capture')
+    expect(lastSuggestPayload().screenshots).toEqual([stored])
+  })
+
+  it('"Capturar Tela" sem captura ao vivo nem captura em disco omite screenshots', async () => {
+    invokeMock.mockImplementation((command: string) =>
+      command === 'capture_screen' || command === 'latest_capture'
+        ? Promise.reject(new Error('nenhuma captura'))
+        : Promise.resolve(undefined),
+    )
+    const { getByRole } = render(ConversationActions, { props: baseProps })
+    await fireEvent.click(getByRole('button', { name: 'Capturar Tela' }))
+
+    expect(invokeMock).toHaveBeenCalledTimes(3)
     expect(lastSuggestPayload().screenshots).toBeUndefined()
   })
 
