@@ -1,7 +1,30 @@
 # surfaces/overlay — modal de sessão em tempo real (T-403 / RF-012)
 
-Dois componentes: `Overlay.svelte` (container posicionável) e `InsightCard.svelte`
-(card canônico de insight, reutilizável pelo Notch).
+Três componentes: `OverlayWindow.svelte` (root da janela flutuante dedicada),
+`Overlay.svelte` (container do conteúdo) e `InsightCard.svelte` (card canônico
+de insight, reutilizável pelo Notch).
+
+## OverlayWindow.svelte — a janela flutuante
+
+O texto do assistente vive numa **janela Tauri própria** (label `overlay`,
+configurada em `core/tauri.conf.json`: transparente, sem decorações,
+always-on-top, fora da janela main) — mesmo modelo do Notch e da AppBar. Este
+componente é o root dessa janela e cuida SÓ da gestão de janela:
+
+- Visibilidade: `show_overlay` (reunião iniciada, hint, insight em streaming,
+  stealth-unsupported) e `hide_window` (reunião encerrada). Fora de reunião,
+  conteúdo transitório recolhe após 15s de leitura.
+- Movimento (RF-507): atalhos `moveModal*` movem a **janela** via
+  `move_window` — não existe mais transform in-page.
+- Redimensionamento: um `ResizeObserver` chama `resize_window` com a altura
+  do conteúdo (o body da superfície `overlay` é transparente via
+  `body[data-surface='overlay']` em app.css).
+- O conteúdo continua sendo `<Overlay>` (abaixo) — nada de stream aqui além
+  do rastreio de status para visibilidade.
+
+**Regra de paridade com o Notch:** este componente escuta eventos globais mas
+NUNCA invoca comandos que a janela main também trata (`toggle_mic_capture`,
+`toggle_window`…) — a duplicação executaria a ação duas vezes.
 
 ## Overlay.svelte
 

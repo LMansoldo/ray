@@ -94,10 +94,18 @@ fn get_meter_levels() -> Vec<serde_json::Value> {
 }
 
 /// Alterna a captura do microfone (canal VOCÊ), preservando o OUTROS.
-/// Retorna o novo estado (RF-604 — ⌘⇧D).
+/// Retorna o novo estado (RF-604 — ⌘⇧D). O aviso vai por ray:analysis-hint
+/// para todas as janelas — a superfície que o exibe é o Overlay flutuante.
 #[tauri::command]
-fn toggle_mic_capture() -> bool {
-    audio::set_mic_capture(!audio::mic_capture_enabled())
+fn toggle_mic_capture(app: tauri::AppHandle) -> bool {
+    let enabled = audio::set_mic_capture(!audio::mic_capture_enabled());
+    let _ = app.emit(
+        "ray:analysis-hint",
+        serde_json::json!({
+            "text": if enabled { "Microfone retomado." } else { "Microfone pausado (⌘⇧D)." }
+        }),
+    );
+    enabled
 }
 
 /// Mostra a janela do Notch ancorada no topo-centro do monitor (RF-013).
@@ -117,6 +125,63 @@ fn show_notch(app: tauri::AppHandle) -> Result<(), String> {
     }
     windows::set_always_on_top("notch", true);
     win.show().map_err(|e| e.to_string())
+}
+
+/// Mostra a janela do Overlay flutuante (RF-012) — fora da janela main, como
+/// Notch e AppBar. A UI pede este comando quando há conteúdo (reunião,
+/// insight, aviso); a movimentação fina fica com move_window (RF-507).
+/// O ancoramento no canto superior direito acontece só quando a janela está
+/// oculta — a posição movida pelo usuário durante a sessão é preservada.
+#[tauri::command]
+fn show_overlay(app: tauri::AppHandle) -> Result<(), String> {
+    let win = app
+        .get_webview_window("overlay")
+        .ok_or_else(|| "janela 'overlay' nao encontrada".to_string())?;
+    if !win.is_visible().unwrap_or(false) {
+        if let Ok(Some(mon)) = win.current_monitor() {
+            let m_size = mon.size();
+            let m_pos = mon.position();
+            if let Ok(size) = win.outer_size() {
+                let x = m_pos.x + m_size.width.saturating_sub(size.width) as i32 - 24;
+                let y = m_pos.y + 60;
+                let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+            }
+        }
+    }
+    windows::set_always_on_top("overlay", true);
+    win.show().map_err(|e| e.to_string())
+}
+
+/// Move uma janela por deslocamento relativo em pixels físicos
+/// (RF-507 — atalhos moveModal*).
+#[tauri::command]
+fn move_window(
+    app: tauri::AppHandle,
+    window_label: String,
+    dx: i32,
+    dy: i32,
+) -> Result<(), String> {
+    let win = app
+        .get_webview_window(&window_label)
+        .ok_or_else(|| format!("janela '{window_label}' nao encontrada"))?;
+    let pos = win.outer_position().map_err(|e| e.to_string())?;
+    win.set_position(tauri::PhysicalPosition::new(pos.x + dx, pos.y + dy))
+        .map_err(|e| e.to_string())
+}
+
+/// Redimensiona uma janela para tamanho lógico — o Overlay ajusta a janela
+/// flutuante à altura do conteúdo (o card cresce até o teto do InsightCard).
+#[tauri::command]
+fn resize_window(
+    app: tauri::AppHandle,
+    window_label: String,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    app.get_webview_window(&window_label)
+        .ok_or_else(|| format!("janela '{window_label}' nao encontrada"))?
+        .set_size(tauri::LogicalSize::new(width, height))
+        .map_err(|e| e.to_string())
 }
 
 /// Lista sessões recentes (RF-802) — delega ao sidecar.
@@ -1699,6 +1764,9 @@ pub fn run() {
             get_meter_levels,
             toggle_mic_capture,
             show_notch,
+            show_overlay,
+            move_window,
+            resize_window,
             suggest,
             transcribe_pending_pcm,
             open_logs_folder,

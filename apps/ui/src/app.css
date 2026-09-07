@@ -72,6 +72,13 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Superfície overlay (janela flutuante do texto do assistente): o body NÃO
+   pinta fundo — o vidro do InsightCard flutua direto sobre o desktop. O
+   App.svelte marca o body com data-surface=<window label>. */
+body[data-surface='overlay'] {
+  background: transparent;
+}
+
 /* ── Foco visível consistente (acessibilidade premium) ─────────────────── */
 
 :focus-visible {

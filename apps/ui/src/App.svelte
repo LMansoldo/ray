@@ -7,7 +7,7 @@
   import Onboarding from './surfaces/onboarding/Onboarding.svelte'
   import Settings from './surfaces/settings/Settings.svelte'
   import Assistants from './surfaces/assistants/Assistants.svelte'
-  import Overlay from './surfaces/overlay/Overlay.svelte'
+  import OverlayWindow from './surfaces/overlay/OverlayWindow.svelte'
   import Notch from './surfaces/notch/Notch.svelte'
   import { onHomeNavigate } from './surfaces/home/navigation'
   import { onOnboardingRestart } from './surfaces/onboarding/restart'
@@ -18,11 +18,9 @@
   import type {
     CredentialSummary,
     InjectedCredential,
-    SuggestStreamEvent,
     TranscriptContextSegment,
   } from '../../../contracts/ipc'
   import type { HomeProps, SessionSummary } from './surfaces/home/types'
-  import type { OverlayPosition } from './surfaces/overlay/types'
 
   type Surface = 'onboarding' | 'home' | 'settings' | 'assistants'
 
@@ -35,17 +33,21 @@
   const windowLabel = currentWindow.label
   const isAppBarWindow = windowLabel === 'appbar'
   const isNotchWindow = windowLabel === 'notch'
+  const isOverlayWindow = windowLabel === 'overlay'
+
+  // Superfícies flutuantes de conteúdo (overlay) não pintam fundo: o vidro do
+  // card flutua direto sobre o desktop (ver app.css). As demais mantêm o body
+  // escuro padrão.
+  document.body.dataset.surface = windowLabel
 
   const initialSurface: Surface = localStorage.getItem(ONBOARDING_DONE_KEY)
     ? 'home'
     : 'onboarding'
 
   let surface = $state<Surface>(initialSurface)
-  let overlayVisible = $state(false)
   let meetingActive = $state(false)
   let screenshots = $state<string[]>([])
   let transcript = $state<TranscriptContextSegment[]>([])
-  let analysisHint = $state('')
   let sessions = $state<SessionSummary[]>([])
 
   // ── Assistente selecionado (RF-337): a escolha da biblioteca troca a
@@ -123,10 +125,10 @@
     }
   }
 
-  // ── Janela: opacidade, sempre-no-topo, posição do overlay (RF-505/506/507)
+  // ── Janela: opacidade e sempre-no-topo (RF-505/506). A posição do overlay
+  // flutuante agora é a posição da janela própria (move_window no núcleo).
   let alwaysOnTop = $state(false)
   let windowOpacity = $state(1)
-  let overlayPosition = $state<OverlayPosition>({ x: 0, y: 0 })
 
   // ── Memória em tempo real (RF-339): deriva da transcrição ao vivo ──────
   const memoryItems = $derived(
@@ -206,36 +208,15 @@
         )
         break
       }
-      case 'moveModalUp':
-      case 'moveModalDown':
-      case 'moveModalLeft':
-      case 'moveModalRight': {
-        const step = 28
-        overlayPosition = {
-          x: overlayPosition.x + (action === 'moveModalLeft' ? -step : action === 'moveModalRight' ? step : 0),
-          y: overlayPosition.y + (action === 'moveModalUp' ? -step : action === 'moveModalDown' ? step : 0),
-        }
-        break
-      }
       case 'scrollUp':
       case 'scrollDown': {
         window.scrollBy({ top: action === 'scrollUp' ? -360 : 360, behavior: 'smooth' })
         break
       }
       case 'toggleMicCapture': {
-        void invoke<boolean>('toggle_mic_capture')
-          .then((enabled) => {
-            analysisHint = enabled ? 'Microfone retomado.' : 'Microfone pausado (⌘⇧D).'
-          })
-          .catch(console.error)
-        break
-      }
-      case 'previousResponse':
-      case 'nextResponse': {
-        // O Overlay escuta este evento DOM e navega o histórico (RF-334).
-        window.dispatchEvent(
-          new CustomEvent('ray:insight-nav', { detail: { dir: action === 'previousResponse' ? 'prev' : 'next' } }),
-        )
+        // O núcleo emite o aviso (pausado/retomado) via ray:analysis-hint —
+        // quem o exibe é a janela flutuante do Overlay.
+        void invoke<boolean>('toggle_mic_capture').catch(console.error)
         break
       }
       default:
@@ -272,6 +253,10 @@
   }
 
   onMount(() => {
+    // A janela flutuante do overlay gere a própria visibilidade/movimento em
+    // OverlayWindow.svelte — nada da lógica da main roda aqui.
+    if (isOverlayWindow) return
+
     if (isAppBarWindow || isNotchWindow) {
       // O Notch navega o próprio histórico ouvindo ray:shortcut direto.
       if (isNotchWindow) {
@@ -320,14 +305,12 @@
     // ── Eventos do núcleo ────────────────────────────────────────────────
     track(
       listen('ray:meeting-started', () => {
-        overlayVisible = true
         meetingActive = true
         syncNotchVisibility()
       }),
     )
     track(
       listen('ray:meeting-stopped', () => {
-        overlayVisible = false
         meetingActive = false
         void refreshSessions()
         syncNotchVisibility()
@@ -356,17 +339,6 @@
             startMs: Date.now(),
           },
         ].slice(-40)
-      }),
-    )
-    track(
-      listen<{ text: string }>('ray:analysis-hint', (event) => {
-        analysisHint = event.payload.text
-        overlayVisible = true
-      }),
-    )
-    track(
-      listen('stealth-unsupported', () => {
-        analysisHint = 'Stealth não suportado neste sistema — as janelas podem aparecer na captura.'
       }),
     )
     track(
@@ -403,16 +375,6 @@
     track(
       listen<{ visible: boolean }>('ray:meters-changed', (event) => {
         metersVisible = event.payload?.visible !== false
-      }),
-    )
-
-    // Fluxos disparados por atalho global fora de reunião: o início do
-    // streaming abre o Overlay (RF-333/RF-706 — resposta sempre no overlay).
-    track(
-      listen<SuggestStreamEvent>('suggest-stream', (event) => {
-        if (event.payload.type === 'start') {
-          overlayVisible = true
-        }
       }),
     )
 
@@ -483,6 +445,8 @@
   <AppBar />
 {:else if isNotchWindow}
   <Notch />
+{:else if isOverlayWindow}
+  <OverlayWindow />
 {:else}
   <div class="app">
     {#if surface === 'onboarding'}
@@ -493,10 +457,6 @@
       <Settings />
     {:else if surface === 'assistants'}
       <Assistants />
-    {/if}
-
-    {#if overlayVisible}
-      <Overlay {meetingActive} hint={analysisHint} position={overlayPosition} autoScroll={features.autoScroll} />
     {/if}
   </div>
 {/if}

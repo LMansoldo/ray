@@ -52,6 +52,22 @@
         "focus": false,
         "shadow": false,
         "center": true
+      },
+      {
+        "label": "overlay",
+        "title": "Ray Overlay",
+        "url": "/",
+        "width": 460,
+        "height": 320,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "resizable": false,
+        "visible": false,
+        "skipTaskbar": true,
+        "focus": false,
+        "shadow": false,
+        "center": true
       }
     ]
   },
