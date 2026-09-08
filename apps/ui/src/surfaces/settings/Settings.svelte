@@ -459,6 +459,7 @@
     toggleVoiceRecording: 'Gravação de Voz',
     toggleMicCapture: 'Alternar Captura do Microfone',
     pushToListen: 'Ouvir Segurando (solte para analisar)',
+    pushToLook: 'Olhar Segurando (salva e analisa a tela)',
     scrollUp: 'Rolar Cima',
     scrollDown: 'Rolar Baixo',
     notchPreviousInsight: 'Insight Anterior do Notch',

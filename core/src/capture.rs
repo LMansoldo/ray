@@ -73,25 +73,37 @@ pub fn capture_to(dir: &Path) -> Result<(PathBuf, String), String> {
             &target_path,
         ])
         .status();
-    let (final_path, mime) = match resized {
+    let final_path = match resized {
         Ok(s) if s.success() => {
             let _ = std::fs::remove_file(&raw);
-            (target, "image/jpeg")
+            target
         }
         _ => {
             let _ = std::fs::rename(&raw, &target);
-            (target, "image/png")
+            target
         }
     };
 
     prune_old_captures(dir);
 
-    let bytes = std::fs::read(&final_path).map_err(|e| format!("falha ler captura: {e}"))?;
+    Ok((final_path.clone(), data_url_for(&final_path)?))
+}
+
+/// Codifica um arquivo de imagem do disco como data URL — o base64 existe em
+/// memória apenas durante esta chamada (padrão do projeto: imagens em disco,
+/// base64 só no ato do uso).
+pub fn data_url_for(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("falha ler captura: {e}"))?;
     if bytes.is_empty() {
         return Err("captura vazia (permissao de Screen Recording negada?)".into());
     }
+    let mime = if path.extension().is_some_and(|e| e == "png") {
+        "image/png"
+    } else {
+        "image/jpeg"
+    };
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok((final_path, format!("data:{mime};base64,{b64}")))
+    Ok(format!("data:{mime};base64,{b64}"))
 }
 
 /// Mantém só as MAX_STORED_CAPTURES mais recentes na pasta.
@@ -133,17 +145,7 @@ pub fn latest_capture(app: tauri::AppHandle) -> Result<String, String> {
         })
         .max()
         .ok_or_else(|| "nenhuma captura armazenada".to_string())?;
-    let bytes = std::fs::read(&newest).map_err(|e| format!("falha ler captura: {e}"))?;
-    if bytes.is_empty() {
-        return Err("captura vazia".into());
-    }
-    let mime = if newest.extension().is_some_and(|e| e == "png") {
-        "image/png"
-    } else {
-        "image/jpeg"
-    };
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(format!("data:{mime};base64,{b64}"))
+    data_url_for(&newest)
 }
 
 /// Captura e devolve o data URL para uso imediato (request ao provedor).
