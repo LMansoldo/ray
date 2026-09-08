@@ -73,37 +73,25 @@ pub fn capture_to(dir: &Path) -> Result<(PathBuf, String), String> {
             &target_path,
         ])
         .status();
-    let final_path = match resized {
+    let (final_path, mime) = match resized {
         Ok(s) if s.success() => {
             let _ = std::fs::remove_file(&raw);
-            target
+            (target, "image/jpeg")
         }
         _ => {
             let _ = std::fs::rename(&raw, &target);
-            target
+            (target, "image/png")
         }
     };
 
     prune_old_captures(dir);
 
-    Ok((final_path.clone(), data_url_for(&final_path)?))
-}
-
-/// Codifica um arquivo de imagem do disco como data URL — o base64 existe em
-/// memória apenas durante esta chamada (padrão do projeto: imagens em disco,
-/// base64 só no ato do uso).
-pub fn data_url_for(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("falha ler captura: {e}"))?;
+    let bytes = std::fs::read(&final_path).map_err(|e| format!("falha ler captura: {e}"))?;
     if bytes.is_empty() {
         return Err("captura vazia (permissao de Screen Recording negada?)".into());
     }
-    let mime = if path.extension().is_some_and(|e| e == "png") {
-        "image/png"
-    } else {
-        "image/jpeg"
-    };
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(format!("data:{mime};base64,{b64}"))
+    Ok((final_path, format!("data:{mime};base64,{b64}")))
 }
 
 /// Mantém só as MAX_STORED_CAPTURES mais recentes na pasta.
@@ -145,7 +133,17 @@ pub fn latest_capture(app: tauri::AppHandle) -> Result<String, String> {
         })
         .max()
         .ok_or_else(|| "nenhuma captura armazenada".to_string())?;
-    data_url_for(&newest)
+    let bytes = std::fs::read(&newest).map_err(|e| format!("falha ler captura: {e}"))?;
+    if bytes.is_empty() {
+        return Err("captura vazia".into());
+    }
+    let mime = if newest.extension().is_some_and(|e| e == "png") {
+        "image/png"
+    } else {
+        "image/jpeg"
+    };
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{mime};base64,{b64}"))
 }
 
 /// Captura e devolve o data URL para uso imediato (request ao provedor).

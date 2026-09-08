@@ -39,10 +39,6 @@ pub enum ShortcutCommand {
     /// transcreve o trecho e dispara a análise do agente. É o único comando
     /// com comportamento no keypress E no release.
     PushToListen,
-    /// Push-to-look: variante visual do push-to-listen — salva screenshots
-    /// em disco enquanto pressionado; ao soltar, envia as capturas da janela
-    /// ao agente para análise (resultado no Overlay flutuante).
-    PushToLook,
     ScrollUp,
     ScrollDown,
     NotchPreviousInsight,
@@ -68,14 +64,13 @@ pub type ShortcutMap = HashMap<ShortcutCommand, Option<ShortcutBinding>>;
 /// Teclas unicas permitidas sem modificador (contracts/settings.ts:75).
 pub const ALLOWED_MODIFIERLESS_KEYS: &[&str] = &["CapsLock"];
 
-/// Todos os 21 comandos de atalho (contracts/settings.ts:84-104).
+/// Todos os 20 comandos de atalho (contracts/settings.ts:84-104).
 pub const ALL_SHORTCUT_COMMANDS: &[ShortcutCommand] = &[
     ShortcutCommand::AskOrSend,
     ShortcutCommand::CaptureScreen,
     ShortcutCommand::ToggleVoiceRecording,
     ShortcutCommand::ToggleMicCapture,
     ShortcutCommand::PushToListen,
-    ShortcutCommand::PushToLook,
     ShortcutCommand::ScrollUp,
     ShortcutCommand::ScrollDown,
     ShortcutCommand::NotchPreviousInsight,
@@ -239,7 +234,6 @@ pub fn command_to_action_name(command: ShortcutCommand) -> &'static str {
         ShortcutCommand::ToggleVoiceRecording => "toggleVoiceRecording",
         ShortcutCommand::ToggleMicCapture => "toggleMicCapture",
         ShortcutCommand::PushToListen => "pushToListen",
-        ShortcutCommand::PushToLook => "pushToLook",
         ShortcutCommand::ScrollUp => "scrollUp",
         ShortcutCommand::ScrollDown => "scrollDown",
         ShortcutCommand::NotchPreviousInsight => "notchPreviousInsight",
@@ -359,12 +353,6 @@ pub fn build_default_shortcuts() -> ShortcutMap {
             ShortcutCommand::PushToListen,
             vec![ShortcutModifier::Alt],
             "Space",
-        ),
-        // Push-to-look: Cmd+L — variante visual (screenshots no lugar de áudio).
-        (
-            ShortcutCommand::PushToLook,
-            vec![ShortcutModifier::Cmd],
-            "L",
         ),
         (ShortcutCommand::ScrollUp, vec![ShortcutModifier::Cmd], "ArrowUp"),
         (
@@ -825,7 +813,6 @@ mod tests {
                 ShortcutCommand::ToggleVoiceRecording => "toggleVoiceRecording",
                 ShortcutCommand::ToggleMicCapture => "toggleMicCapture",
                 ShortcutCommand::PushToListen => "pushToListen",
-                ShortcutCommand::PushToLook => "pushToLook",
                 ShortcutCommand::ScrollUp => "scrollUp",
                 ShortcutCommand::ScrollDown => "scrollDown",
                 ShortcutCommand::NotchPreviousInsight => "notchPreviousInsight",
@@ -851,11 +838,11 @@ mod tests {
     }
 
     #[test]
-    fn all_commands_count_is_21() {
+    fn all_commands_count_is_20() {
         assert_eq!(
             ALL_SHORTCUT_COMMANDS.len(),
-            21,
-            "must have exactly 21 shortcut commands per contracts/settings.ts"
+            20,
+            "must have exactly 20 shortcut commands per contracts/settings.ts"
         );
     }
 
@@ -961,11 +948,11 @@ mod tests {
 
         // Registrar antigo limpo, novos defaults registrados
         let registered = mock.registered_combos();
-        // 18 bindings padrao devem ter sido registrados
+        // 17 bindings padrao devem ter sido registrados
         assert_eq!(
             registered.len(),
-            18,
-            "must register 18 default bindings after reset"
+            17,
+            "must register 17 default bindings after reset"
         );
     }
 
@@ -979,8 +966,8 @@ mod tests {
 
         assert_eq!(
             map.len(),
-            21,
-            "reset_to_defaults must produce a 21-entry map"
+            20,
+            "reset_to_defaults must produce a 20-entry map"
         );
 
         // 3 null bindings

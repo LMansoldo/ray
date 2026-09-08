@@ -1570,148 +1570,6 @@ fn ptt_release(app: &tauri::AppHandle) {
     });
 }
 
-// ── Push-to-look: variante visual do push-to-listen ────────────────────────
-//
-// Enquanto o atalho está pressionado, screenshots são SALVOS EM DISCO
-// (captures/, mesma poda de sempre) em intervalos fixos; ao soltar, as
-// capturas da janela viram data URLs (sob demanda) e vão ao agente — o
-// resultado faz streaming no Overlay flutuante. Não conflita com a reunião
-// contínua: screenshots não disputam as filas de áudio.
-
-/// True enquanto o atalho push-to-look está pressionado.
-static PTL_HOLDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Caminhos em disco das capturas da janela corrente, em ordem de captura.
-static PTL_PATHS: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
-
-/// Thread de captura da janela corrente — o release aguarda o join antes de
-/// analisar (a última captura pode estar em voo).
-static PTL_WORKER: std::sync::Mutex<Option<std::thread::JoinHandle<()>>> =
-    std::sync::Mutex::new(None);
-
-/// Intervalo entre capturas e teto por janela: 5 imagens ≈ 10s segurando —
-/// mantém o request dentro do tamanho aceitável para modelos multimodais.
-const PTL_CAPTURE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
-const PTL_MAX_CAPTURES: usize = 5;
-
-fn dispatch_push_to_look(app: &tauri::AppHandle, pressed: bool) {
-    if pressed {
-        ptl_start_hold(app);
-    } else {
-        ptl_release(app);
-    }
-}
-
-/// Pressionou: captura imediata e loop de capturas periódicas até soltar.
-fn ptl_start_hold(app: &tauri::AppHandle) {
-    use std::sync::atomic::Ordering;
-    // Análise anterior ainda processando o release: não misturar janelas.
-    if PTL_WORKER
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .is_some()
-    {
-        let _ = app.emit(
-            "ray:analysis-hint",
-            serde_json::json!({ "text": "Análise anterior ainda em andamento — aguarde um instante." }),
-        );
-        return;
-    }
-    // Key repeat do SO dispara Pressed várias vezes — só a primeira vale.
-    if PTL_HOLDING.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    let dir = match capture::captures_dir(app) {
-        Ok(dir) => dir,
-        Err(e) => {
-            PTL_HOLDING.store(false, Ordering::SeqCst);
-            eprintln!("[ray] push-to-look: {e}");
-            let _ = app.emit(
-                "ray:analysis-hint",
-                serde_json::json!({ "text": "Não foi possível preparar a pasta de capturas — verifique os logs." }),
-            );
-            return;
-        }
-    };
-    PTL_PATHS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
-    let _ = app.emit(
-        "ray:analysis-hint",
-        serde_json::json!({ "text": "Olhando a tela… solte o atalho para o Ray analisar." }),
-    );
-    let worker = std::thread::spawn(move || {
-        let mut last = std::time::Instant::now();
-        let mut count = 0usize;
-        loop {
-            if !PTL_HOLDING.load(Ordering::SeqCst) || count >= PTL_MAX_CAPTURES {
-                break;
-            }
-            if last.elapsed() >= PTL_CAPTURE_INTERVAL {
-                match capture::capture_to(&dir) {
-                    Ok((path, _)) => {
-                        PTL_PATHS
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .push(path);
-                        count += 1;
-                    }
-                    Err(e) => {
-                        eprintln!("[ray] push-to-look: captura falhou: {e}");
-                        break;
-                    }
-                }
-                last = std::time::Instant::now();
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-    });
-    *PTL_WORKER.lock().unwrap_or_else(|e| e.into_inner()) = Some(worker);
-}
-
-/// Soltou: encerra o loop de capturas, lê os arquivos da janela do disco e
-/// dispara a análise visual do agente.
-fn ptl_release(app: &tauri::AppHandle) {
-    use std::sync::atomic::Ordering;
-    if !PTL_HOLDING.swap(false, Ordering::SeqCst) {
-        return;
-    }
-    let app_t = app.clone();
-    std::thread::spawn(move || {
-        // A última captura pode estar em voo — aguarda a thread de captura.
-        let worker = PTL_WORKER.lock().unwrap_or_else(|e| e.into_inner()).take();
-        if let Some(handle) = worker {
-            let _ = handle.join();
-        }
-        let paths =
-            std::mem::take(&mut *PTL_PATHS.lock().unwrap_or_else(|e| e.into_inner()));
-        if paths.is_empty() {
-            let _ = app_t.emit(
-                "ray:analysis-hint",
-                serde_json::json!({ "text": "Nenhuma captura foi salva — verifique a permissão de Gravação de Tela." }),
-            );
-            return;
-        }
-        let mut shots = Vec::new();
-        for path in paths {
-            match capture::data_url_for(&path) {
-                Ok(url) => shots.push(url),
-                Err(e) => eprintln!("[ray] push-to-look: {e}"),
-            }
-        }
-        if shots.is_empty() {
-            let _ = app_t.emit(
-                "ray:analysis-hint",
-                serde_json::json!({ "text": "As capturas ficaram vazias — verifique a permissão de Gravação de Tela." }),
-            );
-            return;
-        }
-        // Análise visual: as capturas da janela são o contexto principal.
-        shortcut_suggest(&app_t, ipc::SuggestionTrigger::ScreenCapture, Some(shots), None);
-    });
-}
-
 /// Ponte atalho global → ação do núcleo (RF-333/RF-706/CA-1).
 /// Comandos de UI (rolagem, notch, opacidade…) são repassados via evento
 /// `ray:shortcut` com o nome da ação.
@@ -1773,9 +1631,6 @@ fn dispatch_shortcut(app: &tauri::AppHandle, command: ShortcutCommand) {
         ShortcutCommand::PushToListen => {
             // Tratado por dispatch_push_to_listen no handler (pressed E
             // released) — braço explícito para não vazar ray:shortcut à UI.
-        }
-        ShortcutCommand::PushToLook => {
-            // Idem: dispatch_push_to_look trata os dois estados no handler.
         }
         other => {
             let _ = app.emit(
@@ -2013,8 +1868,6 @@ pub fn run() {
                     };
                     if command == ShortcutCommand::PushToListen {
                         dispatch_push_to_listen(app, event.state == ShortcutState::Pressed);
-                    } else if command == ShortcutCommand::PushToLook {
-                        dispatch_push_to_look(app, event.state == ShortcutState::Pressed);
                     } else if event.state == ShortcutState::Pressed {
                         dispatch_shortcut(app, command);
                     }
