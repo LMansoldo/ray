@@ -1641,9 +1641,30 @@ fn ptl_start_hold(app: &tauri::AppHandle) {
         "ray:analysis-hint",
         serde_json::json!({ "text": "Olhando a tela… solte o atalho para o Ray analisar." }),
     );
+    let app_worker = app.clone();
     let worker = std::thread::spawn(move || {
+        // Primeira captura IMEDIATA (fora do intervalo): um toque rápido já
+        // rende uma análise — e uma falha real (ex.: permissão) avisa AGORA,
+        // não no release.
+        let mut count = match capture::capture_to(&dir) {
+            Ok((path, _)) => {
+                PTL_PATHS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(path);
+                1
+            }
+            Err(e) => {
+                eprintln!("[ray] push-to-look: primeira captura falhou: {e}");
+                PTL_HOLDING.store(false, Ordering::SeqCst);
+                let _ = app_worker.emit(
+                    "ray:analysis-hint",
+                    serde_json::json!({ "text": "Captura de tela falhou — verifique a permissão de Gravação de Tela." }),
+                );
+                return;
+            }
+        };
         let mut last = std::time::Instant::now();
-        let mut count = 0usize;
         loop {
             if !PTL_HOLDING.load(Ordering::SeqCst) || count >= PTL_MAX_CAPTURES {
                 break;
