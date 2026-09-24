@@ -255,18 +255,21 @@ impl LinearResampler {
     }
 
     /// Converte um chunk de entrada mono f32 em saída 16k mono i16.
+    /// A fase avança 1 por amostra de entrada; a cada `step` unidades
+    /// consumidas emite UMA saída (48k → 1 a cada 3). O loop invertido
+    /// (emitir `step` por entrada) upsampling 3x: o recognizer recebia
+    /// fala esticada 3x com pitch /3 — "sem fala" — e cancelava (1110).
     fn feed(&mut self, input: &[f32], out: &mut Vec<i16>) {
         for &sample in input {
-            let mut p = self.pos + self.step;
-            while p >= 1.0 {
-                p -= 1.0;
-                let t = p as f32;
+            self.pos += 1.0;
+            while self.pos >= self.step {
+                self.pos -= self.step;
+                let t = (1.0 - self.pos / self.step) as f32;
                 let v = self.prev + (sample - self.prev) * t;
                 let clamped = v.clamp(-1.0, 1.0);
                 out.push((clamped * 32_767.0) as i16);
             }
             self.prev = sample;
-            self.pos = p;
         }
     }
 }
@@ -1129,6 +1132,70 @@ mod tests {
         assert_eq!(
             frames[PCM_QUEUE_CAPACITY - 1][0], 9999,
             "newest frame must be last"
+        );
+    }
+
+    // ===========================================================================
+    // LinearResampler — razão correta de amostras (regressão do bug do 1110:
+    // o laço emitia `step` amostras POR entrada — upsample 3x @48k — e a fala
+    // chegava ao recognizer esticada/pitch /3, que cancelava toda janela).
+    // ===========================================================================
+
+    #[test]
+    fn resampler_48k_to_16k_emits_one_third_of_input() {
+        let mut r = LinearResampler::new(48_000);
+        // 1s de rampa @48kHz.
+        let input: Vec<f32> = (0..48_000).map(|i| i as f32 / 48_000.0).collect();
+        let mut out = Vec::new();
+        r.feed(&input, &mut out);
+        assert!(
+            (out.len() as i64 - 16_000).abs() <= 2,
+            "1s @48k deve virar ~16000 amostras @16k, veio {}",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn resampler_44k1_to_16k_emits_16k_per_second() {
+        let mut r = LinearResampler::new(44_100);
+        let input: Vec<f32> = vec![0.5; 44_100];
+        let mut out = Vec::new();
+        r.feed(&input, &mut out);
+        assert!(
+            (out.len() as i64 - 16_000).abs() <= 2,
+            "1s @44.1k deve virar ~16000 amostras, veio {}",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn resampler_16k_is_passthrough() {
+        let mut r = LinearResampler::new(16_000);
+        let input: Vec<f32> = (0..16_000).map(|i| (i % 1000) as f32 / 1000.0).collect();
+        let mut out = Vec::new();
+        r.feed(&input, &mut out);
+        assert_eq!(out.len(), input.len(), "16k → 16k não pode mudar o tamanho");
+        for (o, i) in out.iter().zip(input.iter()) {
+            let expected = (i * 32_767.0) as i16;
+            assert!(
+                (o - expected).abs() <= 1,
+                "passthrough deve preservar o valor: {o} vs {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn resampler_output_tracks_input_time_not_stretched() {
+        // Conteúdo: a saída k deve corresponder à entrada ~3k (48k→16k) —
+        // se o sinal esticar de novo (bug), out[k] ficaria ~k/3.
+        let mut r = LinearResampler::new(48_000);
+        let input: Vec<f32> = (0..48_000).map(|i| i as f32 / 48_000.0).collect();
+        let mut out = Vec::new();
+        r.feed(&input, &mut out);
+        let last_out = *out.last().unwrap() as f32 / 32_767.0;
+        assert!(
+            (last_out - 1.0).abs() < 0.001,
+            "1s de rampa deve terminar perto de 1.0 na saída, veio {last_out}"
         );
     }
 }

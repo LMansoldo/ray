@@ -38,6 +38,31 @@
       body.scrollTop = body.scrollHeight - body.clientHeight
     }
   })
+
+  // Atalhos overlayScroll* (OverlayWindow → evento DOM ray:overlay-scroll):
+  // rolam o corpo do DIGA ISSO. followEnd reavalia como na rolagem manual —
+  // parar no fim retoma a rolagem automática, subir a pausa (RF-701).
+  const OVERLAY_SCROLL_MIN_STEP_PX = 80
+
+  function handleOverlayScrollShortcut(event: Event): void {
+    const dir = (event as CustomEvent<{ dir?: string }>).detail?.dir
+    if (dir !== 'up' && dir !== 'down') return
+    const body = sayThisBody
+    if (body === null) return
+    const step = Math.max(
+      OVERLAY_SCROLL_MIN_STEP_PX,
+      Math.floor(body.clientHeight * 0.6),
+    )
+    body.scrollTop += dir === 'up' ? -step : step
+    followEnd = body.scrollTop + body.clientHeight >= body.scrollHeight
+  }
+
+  $effect(() => {
+    window.addEventListener('ray:overlay-scroll', handleOverlayScrollShortcut)
+    return () => {
+      window.removeEventListener('ray:overlay-scroll', handleOverlayScrollShortcut)
+    }
+  })
 </script>
 
 <article
@@ -183,16 +208,20 @@
     max-height: 18rem;
     overflow-y: auto;
     padding-right: 0.4rem;
-    font-size: 1.3rem;
-    line-height: 1.65;
+    /* ~10px (1rem = 10px): o texto do agente (inclusive código) precisa ser
+       compacto dentro da janela flutuante. */
+    font-size: 1rem;
+    line-height: 1.6;
     color: var(--text-p);
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   /* Cursor de streaming (mock: .cursor) */
   .cursor {
     display: inline-block;
     width: 2px;
-    height: 1.4rem;
+    height: 1.2rem;
     background: var(--iris);
     vertical-align: text-bottom;
     margin-left: 1px;

@@ -94,17 +94,34 @@ fn get_or_create_engine(
     }
     let map = guard.as_mut().unwrap();
     if !map.contains_key(speaker) {
-        let engine = create_engine()?;
+        let engine = create_engine(speaker)?;
         map.insert(speaker.clone(), engine);
     }
     Ok(guard)
 }
 
-/// Reseta os motores persistentes (para isolamento entre testes e sessões).
+/// Descarta os motores persistentes (fim de reunião/soltar do push-to-listen).
+/// Os modelos on-device (Apple Speech) ficam residentes enquanto o motor vive
+/// — liberá-los no fim do uso devolve a RAM; o próximo uso recria sob demanda
+/// via get_or_create_engine. Também isola estado entre testes e sessões
+/// (janela de PCM parcial não vaza para a próxima sessão).
 pub fn reset_engine() {
     if let Ok(mut guard) = ENGINES.lock() {
         *guard = None;
     }
+    // Motores mortos = nenhum task vivo: devolve o slot global do on-device
+    // (um task preso aqui trava a transcrição da próxima sessão).
+    #[cfg(target_os = "macos")]
+    sfs::reset_slot();
+}
+
+/// Motores vivos no momento — inspeção de testes do ciclo liberar/recriar.
+#[cfg(test)]
+pub(crate) fn engine_count() -> usize {
+    ENGINES
+        .lock()
+        .map(|guard| guard.as_ref().map_or(0, std::collections::HashMap::len))
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -113,14 +130,25 @@ pub fn reset_engine() {
 
 /// Cria o motor STT adequado para a plataforma atual.
 /// ADR-007: macOS → AppleSpeech, Windows/Linux → Whisper.
-fn create_engine() -> Result<Box<dyn SttEngine>, SttError> {
+fn create_engine(speaker: &Speaker) -> Result<Box<dyn SttEngine>, SttError> {
     #[cfg(target_os = "macos")]
     {
-        Ok(Box::new(AppleSpeechEngine::new()?))
+        Ok(Box::new(AppleSpeechEngine::new(speaker_label(speaker))?))
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = speaker;
         Ok(Box::new(WhisperCppEngine::new()?))
+    }
+}
+
+/// Rótulo estático do canal ("self"/"others") — entra nos logs do motor para
+/// discriminar qual canal falha (ex.: erro 1110 só num canal = conflito de
+/// task on-device concorrente; nos dois = modelo/locale do sistema).
+fn speaker_label(speaker: &Speaker) -> &'static str {
+    match speaker {
+        Speaker::Self_ => "self",
+        Speaker::Others => "others",
     }
 }
 
@@ -150,14 +178,14 @@ enum AppleSpeechInner {
 
 #[cfg(target_os = "macos")]
 impl AppleSpeechEngine {
-    fn new() -> Result<Self, SttError> {
-        let inner = match sfs::SfsProxy::spawn() {
+    fn new(label: &'static str) -> Result<Self, SttError> {
+        let inner = match sfs::SfsProxy::spawn(label) {
             Some(real) => {
-                eprintln!("[stt] Apple Speech REAL ativo (on-device)");
+                eprintln!("[stt] Apple Speech REAL ativo ({label})");
                 AppleSpeechInner::Real(real)
             }
             None => {
-                eprintln!("[stt] Apple Speech indisponível/nao autorizado — placeholder de janelas");
+                eprintln!("[stt] Apple Speech indisponível/nao autorizado — placeholder de janelas ({label})");
                 AppleSpeechInner::Placeholder(PlaceholderWindows::new())
             }
         };
@@ -267,7 +295,8 @@ mod sfs {
         SFSpeechRecognizerAuthorizationStatus,
     };
     use std::sync::mpsc::{self, Receiver};
-    use std::time::{Duration, Instant};
+    use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     /// Duração do segmento emitido (ms). 6s equilibra latência e acurácia.
     const SEGMENT_MS: i32 = 6_000;
@@ -276,7 +305,74 @@ mod sfs {
     /// Timeout do resultado final do recognizer.
     const FINAL_TIMEOUT: Duration = Duration::from_secs(4);
 
+    // ── Slot global de task on-device (UM por vez no processo) ──────────────
+    //
+    // O reconhecimento on-device aceita um único task simultâneo: com os dois
+    // motores vivos (self/others), cada new_request de um cancela o task do
+    // outro — kAFAssistantErrorDomain 1110 nos DOIS canais, janelas vazias.
+    // O slot alterna janelas entre os canais; quem espera acumula PCM
+    // (teto 30s) e abre a própria janela quando chegar a sua vez.
+    static SLOT_HELD: AtomicU8 = AtomicU8::new(0); // 0 livre, 1 self, 2 others
+    static LAST_HOLDER: AtomicU8 = AtomicU8::new(0);
+    static LAST_RELEASE_MS: AtomicU64 = AtomicU64::new(0);
+    /// Carência pós-liberação: quem soltou só reassume depois desse tempo,
+    /// dando a vez ao outro canal (se ele tiver áudio; se não tiver, o
+    /// canal anterior reassume — sem deadlock com um canal silencioso).
+    const SLOT_GRACE_MS: u64 = 3_000;
+
+    fn channel_id(label: &str) -> u8 {
+        if label == "self" {
+            1
+        } else {
+            2
+        }
+    }
+
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    fn try_acquire_slot(label: &'static str) -> bool {
+        let id = channel_id(label);
+        let held = SLOT_HELD.load(Ordering::Acquire);
+        if held == id {
+            return true;
+        }
+        if held != 0 {
+            return false;
+        }
+        if LAST_HOLDER.load(Ordering::Relaxed) == id
+            && now_ms().saturating_sub(LAST_RELEASE_MS.load(Ordering::Relaxed)) < SLOT_GRACE_MS
+        {
+            return false;
+        }
+        SLOT_HELD
+            .compare_exchange(0, id, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn release_slot(label: &'static str) {
+        let id = channel_id(label);
+        if SLOT_HELD.load(Ordering::Acquire) == id {
+            SLOT_HELD.store(0, Ordering::Release);
+            LAST_HOLDER.store(id, Ordering::Relaxed);
+            LAST_RELEASE_MS.store(now_ms(), Ordering::Relaxed);
+        }
+    }
+
+    /// Zera o slot quando os motores morrem (reset_engine no fim de sessão) —
+    /// slot preso sem motor vivo travaria a transcrição para sempre.
+    pub(super) fn reset_slot() {
+        SLOT_HELD.store(0, Ordering::Release);
+        LAST_HOLDER.store(0, Ordering::Relaxed);
+    }
+
     pub(super) struct SfsEngine {
+        /// Canal do motor ("self"/"others") — identificação nos logs.
+        label: &'static str,
         recognizer: Retained<SFSpeechRecognizer>,
         format: Retained<AVAudioFormat>,
         request: Option<Retained<SFSpeechAudioBufferRecognitionRequest>>,
@@ -284,6 +380,8 @@ mod sfs {
         /// Handler vivo enquanto o request existe (ObjC retém o block, mas
         /// mantemos por clareza de ciclo de vida).
         rx: Receiver<(String, bool)>,
+        /// PCM acumulado enquanto o slot global estava com o outro canal.
+        backlog: Vec<i16>,
         segment_start_ms: i32,
         pending_ms: i32,
     }
@@ -291,7 +389,7 @@ mod sfs {
     impl SfsEngine {
         /// Cria o engine; None quando Speech não está autorizado (o caller
         /// cai para o placeholder de janelas).
-        pub(super) fn new() -> Option<Self> {
+        pub(super) fn new(label: &'static str) -> Option<Self> {
             if unsafe { SFSpeechRecognizer::authorizationStatus() }
                 != SFSpeechRecognizerAuthorizationStatus::Authorized
             {
@@ -300,6 +398,15 @@ mod sfs {
             // Sem locale explícito: usa o locale do dispositivo (ADR-007).
             let recognizer = unsafe { SFSpeechRecognizer::init(SFSpeechRecognizer::alloc())? };
             unsafe { recognizer.setSupportsOnDeviceRecognition(true) };
+
+            // Diagnóstico do 1110: locale corrente e disponibilidade do
+            // modelo on-device. on-device=false ⇒ assets do idioma não
+            // baixados no sistema (o task cancela em vez de transcrever).
+            let locale_id = unsafe { recognizer.locale().localeIdentifier().to_string() };
+            let on_device = unsafe { recognizer.supportsOnDeviceRecognition() };
+            eprintln!(
+                "[stt] apple speech({label}): locale={locale_id} on-device={on_device}"
+            );
 
             // AVAudioCommonFormat.pcmFormatInt16; mono 16kHz, não-interleaved.
             let format = unsafe {
@@ -312,14 +419,18 @@ mod sfs {
                 )?
             };
 
-            let (request, task, rx) = Self::new_request(&recognizer)?;
-
+            // SEM request inicial: a primeira janela só abre quando o slot
+            // global estiver livre (feed_pcm) — dois tasks on-device vivos
+            // se cancelam mutuamente (1110).
+            let (_dead_tx, rx) = mpsc::channel::<(String, bool)>();
             Some(Self {
+                label,
                 recognizer,
                 format,
-                request: Some(request),
-                task: Some(task),
+                request: None,
+                task: None,
                 rx,
+                backlog: Vec::new(),
                 segment_start_ms: 0,
                 pending_ms: 0,
             })
@@ -328,6 +439,7 @@ mod sfs {
         /// Novo request + task com resultHandler → canal (texto, is_final).
         fn new_request(
             recognizer: &SFSpeechRecognizer,
+            label: &'static str,
         ) -> Option<(
             Retained<SFSpeechAudioBufferRecognitionRequest>,
             Retained<objc2_speech::SFSpeechRecognitionTask>,
@@ -344,6 +456,17 @@ mod sfs {
             let handler = RcBlock::new(
                 move |result: *mut objc2_speech::SFSpeechRecognitionResult,
                       error: *mut objc2_foundation::NSError| {
+                    if !error.is_null() {
+                        // Antes este erro era engolido (virava texto vazio sem
+                        // rastro) — o sintoma era "captura mas nunca transcreve"
+                        // sem explicação. Logar domínio/código para diagnóstico.
+                        let e = unsafe { &*error };
+                        eprintln!(
+                            "[stt] apple speech({label}): task erro {} em {}",
+                            e.code(),
+                            e.domain().to_string(),
+                        );
+                    }
                     if !error.is_null() || result.is_null() {
                         let _ = tx.send((String::new(), true));
                         return;
@@ -411,6 +534,12 @@ mod sfs {
             }
             drop(request);
 
+            if text.trim().is_empty() {
+                // Janela sem texto: conteúdo sem fala (música/silêncio) OU
+                // recognizer mudo (erros aparecem acima via handler). Sem este
+                // log, janelas vazias eram indistinguíveis de áudio ausente.
+                eprintln!("[stt] apple speech({}): janela de {}ms sem texto", self.label, self.pending_ms);
+            }
             let mut segments = Vec::new();
             if !text.trim().is_empty() {
                 let start_ms = self.segment_start_ms;
@@ -425,28 +554,47 @@ mod sfs {
             self.segment_start_ms += self.pending_ms;
             self.pending_ms = 0;
 
-            // Novo request para o próximo segmento; em falha o engine
-            // continua sem request (feed_pcm repõe no próximo chunk).
-            if let Some((request, task, rx)) = Self::new_request(&self.recognizer) {
-                self.request = Some(request);
-                self.task = Some(task);
-                self.rx = rx;
-            }
+            // Fecha a janela e DEVOLVE o slot: o próximo request nasce no
+            // próximo feed_pcm, alternando a vez entre os canais (um task
+            // on-device por vez no processo — dois vivos se cancelam, 1110).
+            self.request = None;
+            self.task = None;
+            release_slot(self.label);
             segments
         }
 
-        /// Anexa PCM ao request corrente (recriando-o se necessário).
+        /// Anexa PCM ao request corrente; sem request, disputa o slot global
+        /// (um task on-device por vez) e, sem slot, acumula no backlog.
         pub(super) fn feed_pcm(&mut self, pcm: &[i16]) -> Result<Vec<EngineSegment>, SttError> {
             if pcm.is_empty() {
                 return Ok(vec![]);
             }
             if self.request.is_none() {
-                if let Some((request, task, rx)) = Self::new_request(&self.recognizer) {
+                if !try_acquire_slot(self.label) {
+                    // Vez do outro canal: acumula (teto de 30s — fala mais
+                    // velha que isso é descartada) e tenta no próximo chunk.
+                    self.backlog.extend_from_slice(pcm);
+                    let max = 16_000 * 30;
+                    if self.backlog.len() > max {
+                        let excess = self.backlog.len() - max;
+                        self.backlog.drain(..excess);
+                    }
+                    return Ok(vec![]);
+                }
+                if let Some((request, task, rx)) = Self::new_request(&self.recognizer, self.label) {
                     self.request = Some(request);
                     self.task = Some(task);
                     self.rx = rx;
                 } else {
+                    release_slot(self.label);
                     return Ok(vec![]);
+                }
+                // Derrama o que acumulou esperando a vez.
+                let backlog = std::mem::take(&mut self.backlog);
+                if !backlog.is_empty() {
+                    let request = self.request.as_ref().expect("request recém-criado");
+                    self.append_pcm(request, &backlog);
+                    self.pending_ms += (backlog.len() as f64 / SAMPLES_PER_MS) as i32;
                 }
             }
             let Some(request) = self.request.as_ref() else {
@@ -462,7 +610,7 @@ mod sfs {
 
         /// Flush do restante do áudio.
         pub(super) fn finalize(&mut self) -> Result<Vec<EngineSegment>, SttError> {
-            if self.pending_ms > 0 {
+            if self.request.is_some() {
                 return Ok(self.close_segment());
             }
             Ok(vec![])
@@ -483,14 +631,14 @@ mod sfs {
     }
 
     impl SfsProxy {
-        pub(super) fn spawn() -> Option<Self> {
+        pub(super) fn spawn(label: &'static str) -> Option<Self> {
             let (tx_in, rx_in) = mpsc::channel::<SfsMsg>();
             let (tx_out, rx_out) = mpsc::channel::<Result<Vec<EngineSegment>, SttError>>();
             let (tx_ready, rx_ready) = mpsc::channel::<bool>();
             std::thread::Builder::new()
                 .name("ray-sfspeech".into())
                 .spawn(move || {
-                    let Some(mut engine) = SfsEngine::new() else {
+                    let Some(mut engine) = SfsEngine::new(label) else {
                         let _ = tx_ready.send(false);
                         return;
                     };
@@ -1157,7 +1305,7 @@ mod tests {
     fn platform_macos_selects_apple_speech() {
         let _guard = PRODUCTION_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_engine();
-        let engine = create_engine().expect(
+        let engine = create_engine(&speaker_self()).expect(
             "ADR-007: macOS must create AppleSpeechEngine — EngineUnavailable is not acceptable on the dev platform"
         );
         assert_eq!(
@@ -1171,7 +1319,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn platform_windows_selects_whisper_cpp() {
         reset_engine();
-        let engine = create_engine().expect("must create engine on Windows");
+        let engine = create_engine(&speaker_self()).expect("must create engine on Windows");
         assert_eq!(
             engine.engine_name(),
             "whisper_cpp",
@@ -1183,7 +1331,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn platform_linux_selects_whisper_cpp() {
         reset_engine();
-        let engine = create_engine().expect("must create engine on Linux");
+        let engine = create_engine(&speaker_self()).expect("must create engine on Linux");
         assert_eq!(
             engine.engine_name(),
             "whisper_cpp",
@@ -1459,6 +1607,10 @@ mod tests {
 
     #[test]
     fn drain_and_process_consumes_pcm_queue() {
+        // Toca no caminho real (cria motor via ENGINES): precisa do lock que
+        // serializa os testes de produção — sem ele, o reset_engine aqui
+        // apaga o motor de um production_engine_* em paralelo (flake).
+        let _serial = PRODUCTION_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_engine();
         crate::audio::clear_pcm_queue();
         crate::audio::push_frame_to_queue(vec![42; 100]);
@@ -1469,5 +1621,31 @@ mod tests {
         // Engine failure (Err) must not prevent queue drain.
         let _ = drain_and_process(speaker_self(), "sess-test");
         assert_eq!(crate::audio::pcm_queue_len(), 0, "queue must be drained regardless of engine result");
+    }
+
+    // =========================================================================
+    // (j) Ciclo de vida dos motores — liberar no fim do uso, recriar sob demanda
+    // =========================================================================
+
+    #[test]
+    fn reset_engine_releases_engines_and_next_use_recreates() {
+        let _serial = PRODUCTION_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        reset_engine();
+        assert_eq!(engine_count(), 0, "precondition: no engines after reset");
+
+        // Uso real (sem mock): o motor nasce sob demanda — placeholder quando
+        // o Apple Speech não está autorizado (CI), REAL no app empacotado.
+        let _ = finalize_transcription(speaker_self(), "sess-engine-lifecycle");
+        assert!(engine_count() > 0, "engine must be created on demand");
+
+        // Fim de sessão (stop_meeting / soltar do push-to-listen): liberar
+        // devolve a RAM dos modelos residentes.
+        reset_engine();
+        assert_eq!(engine_count(), 0, "engines must be released on session end");
+
+        // Próximo uso recria do zero — sem janela de PCM residual da sessão
+        // anterior misturada na nova.
+        let _ = finalize_transcription(speaker_self(), "sess-engine-lifecycle-2");
+        assert!(engine_count() > 0, "engine must be recreated lazily on next use");
     }
 }

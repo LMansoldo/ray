@@ -214,9 +214,12 @@ fn get_app_settings() -> Result<serde_json::Value, String> {
     unwrap_ipc(sidecar_request(port, "GET", "/settings", None)?)
 }
 
-/// Persiste features (RF-700) via sidecar.
+/// Persiste features (RF-700) via sidecar. Antes de delegar, espelha os
+/// flags que o núcleo consome (hoje: features.pushToListen) — efeito
+/// imediato sem esperar a próxima leitura de settings.
 #[tauri::command]
 fn save_feature_toggles(features: serde_json::Value) -> Result<serde_json::Value, String> {
+    update_ptt_gate_from_features(&features);
     let port = SIDECAR_PORT.load(Ordering::Acquire);
     if port == 0 {
         return Err("sidecar not started".into());
@@ -560,6 +563,185 @@ mod tests {
             );
         }
     }
+
+    // ── Modo Ouvir Segurando (features.pushToListen) ──────────────────
+    // Serializa os testes que tocam CONTEXT_LOG/CONTEXT_SEQ/PTT_* (statics
+    // globais; em produção o loop de STT os compartilha).
+    static PTT_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn reset_ptt_state() {
+        CONTEXT_LOG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        PTT_GATED_HOLD.store(false, Ordering::SeqCst);
+        PTT_MARK.store(0, Ordering::SeqCst);
+        PTT_GATE_ENABLED.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn ptt_gate_mirror_follows_features_blob() {
+        let _guard = PTT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        reset_ptt_state();
+
+        update_ptt_gate_from_features(&serde_json::json!({ "pushToListen": true }));
+        assert!(ptt_gate_enabled(), "pushToListen:true deve ligar o gate");
+
+        update_ptt_gate_from_features(&serde_json::json!({ "pushToListen": false }));
+        assert!(!ptt_gate_enabled(), "pushToListen:false deve desligar o gate");
+
+        update_ptt_gate_from_features(&serde_json::json!({ "autoScroll": true }));
+        assert!(
+            !ptt_gate_enabled(),
+            "blob sem pushToListen não liga o gate (default do contrato é desligado)"
+        );
+
+        update_ptt_gate_from_features(&serde_json::json!({ "pushToListen": "sim" }));
+        assert!(!ptt_gate_enabled(), "valor não-booleano não liga o gate");
+
+        reset_ptt_state();
+    }
+
+    #[test]
+    fn held_context_returns_only_entries_after_mark() {
+        let _guard = PTT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        reset_ptt_state();
+
+        push_context("self", "antes 1".into());
+        push_context("others", "antes 2".into());
+        let mark = context_seq_now(); // segurar do atalho
+        push_context("others", "durante 1".into());
+        push_context("self", "durante 2".into());
+
+        let held = held_context_segments(mark);
+        assert_eq!(
+            held.len(),
+            2,
+            "o agente recebe SÓ o que foi dito depois do segurar"
+        );
+        assert_eq!(held[0].text, "durante 1");
+        assert_eq!(held[1].text, "durante 2");
+        assert!(
+            matches!(held[0].speaker, ipc::Speaker::Others),
+            "falante preservado por segmento"
+        );
+        assert!(matches!(held[1].speaker, ipc::Speaker::Self_));
+
+        reset_ptt_state();
+    }
+
+    #[test]
+    fn held_context_empty_when_nothing_new_while_holding() {
+        let _guard = PTT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        reset_ptt_state();
+
+        push_context("self", "antes".into());
+        let mark = context_seq_now();
+
+        assert!(
+            held_context_segments(mark).is_empty(),
+            "segurar sem fala nova não dispara análise (release emite hint)"
+        );
+
+        reset_ptt_state();
+    }
+
+    #[test]
+    fn held_context_survives_the_40_entry_trim() {
+        let _guard = PTT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        reset_ptt_state();
+
+        // Enche o log (cap 40) e marca o segurar.
+        for i in 0..40 {
+            push_context("others", format!("pre {i}"));
+        }
+        let mark = context_seq_now();
+        // Segurar longo: mais de 40 novos segmentos — o trim drena da frente,
+        // mas a janela por seq permanece exata.
+        for i in 0..60 {
+            push_context("self", format!("durante {i}"));
+        }
+
+        let held = held_context_segments(mark);
+        assert_eq!(
+            held.len(),
+            40,
+            "janela sobrevive ao trim: os 40 segmentos mais recentes do segurar"
+        );
+        assert_eq!(held[0].text, "durante 20", "mais antigo sobrevivente");
+        assert_eq!(held[39].text, "durante 59");
+        assert!(
+            held.iter().all(|s| s.text.starts_with("durante")),
+            "nenhum segmento pré-segurar vaza para o agente"
+        );
+
+        reset_ptt_state();
+    }
+
+    // ── sidecar_request — método PUT (persistência de features/atalhos) ──
+    // Regressão: o match só aceitava GET/POST/DELETE, então save_feature_
+    // toggles e apply_shortcuts (PUT /settings) falhavam SEMPRE com
+    // "método desconhecido: PUT" — nada persistia, e o erro era engolido
+    // pela UI. O teste sobe um HTTP server real e pina o método.
+
+    #[test]
+    fn sidecar_request_sends_put_and_unwraps_envelope() {
+        use std::io::{Read, Write};
+        use std::sync::mpsc;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = mpsc::channel::<(String, String)>();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let raw = String::from_utf8_lossy(&buf[..n]).to_string();
+            // Primeira linha "PUT /settings HTTP/1.1" + corpo JSON.
+            let request_line = raw.lines().next().unwrap_or("").to_string();
+            let body = raw
+                .split("\r\n\r\n")
+                .nth(1)
+                .unwrap_or("")
+                .to_string();
+            let _ = tx.send((request_line, body));
+            let resp = r#"{"ok":true,"value":{"saved":true}}"#;
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp.len(),
+                    resp
+                )
+                .as_bytes(),
+            );
+        });
+
+        let raw = sidecar_request(
+            port,
+            "PUT",
+            "/settings",
+            Some(serde_json::json!({ "features": { "pushToListen": true } })),
+        )
+        .expect("PUT deve ser um método suportado pelo sidecar_request");
+
+        let (request_line, body) = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(
+            request_line.starts_with("PUT /settings"),
+            "o verbo PUT precisa chegar ao sidecar, veio: {request_line}"
+        );
+        assert!(
+            body.contains("pushToListen"),
+            "o body JSON precisa ser encaminhado, veio: {body}"
+        );
+        // Mesmo caminho dos comandos save_feature_toggles/apply_shortcuts:
+        // envelope IpcResult desembrulhado por unwrap_ipc.
+        let value = unwrap_ipc(raw).expect("envelope ok deve desembrulhar");
+        assert_eq!(
+            value.get("saved").and_then(|v| v.as_bool()),
+            Some(true),
+            "payload do value deve ser preservado"
+        );
+    }
 }
 
 
@@ -578,12 +760,19 @@ static MEETING: std::sync::Mutex<Option<MeetingSession>> = std::sync::Mutex::new
 /// entre o loop de STT e os fluxos acionados por atalho (Capturar Tela /
 /// Analisar Conversa) para que o copiloto receba "o que foi dito" mesmo
 /// quando o gatilho sai de um atalho global, não do ciclo automático.
-static CONTEXT_LOG: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+/// Cada entrada carrega um seq monotônico: a janela do modo Ouvir Segurando
+/// (held_context_segments) delimita por seq e sobrevive ao trim de 40.
+static CONTEXT_LOG: std::sync::Mutex<Vec<(u64, String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// Próximo seq a ser atribuído a um segmento de contexto. Nunca é zerado —
+/// marcas antigas (PTT_MARK) continuam válidas após clear/trim do log.
+static CONTEXT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Adiciona um segmento ao contexto (com trim para 40 entradas).
 fn push_context(speaker: &str, text: String) {
+    let seq = CONTEXT_SEQ.fetch_add(1, Ordering::SeqCst);
     let mut log = CONTEXT_LOG.lock().unwrap_or_else(|e| e.into_inner());
-    log.push((speaker.to_string(), text));
+    log.push((seq, speaker.to_string(), text));
     let len = log.len();
     if len > 40 {
         log.drain(..len - 40);
@@ -594,7 +783,73 @@ fn push_context(speaker: &str, text: String) {
 fn recent_context_segments(n: usize) -> Vec<ipc::TranscriptContextSegment> {
     let log = CONTEXT_LOG.lock().unwrap_or_else(|e| e.into_inner());
     log.iter().rev().take(n).rev().enumerate()
-        .map(|(i, (speaker, text))| ipc::TranscriptContextSegment {
+        .map(|(i, (_, speaker, text))| ipc::TranscriptContextSegment {
+            speaker: if speaker == "self" {
+                ipc::Speaker::Self_
+            } else {
+                ipc::Speaker::Others
+            },
+            text: text.clone(),
+            start_ms: (i as i32) * 1_000,
+        })
+        .collect()
+}
+
+// ── Modo "Ouvir Segurando" (features.pushToListen) ──────────────────────
+// Com o toggle ligado, a escuta/transcrição contínua NÃO muda — o que muda
+// é quem consome o contexto: o loop de análise automática para de rodar e
+// o agente só recebe o trecho transcritos ENQUANTO o atalho pushToListen
+// está pressionado (ao soltar, analisa exatamente o intervalo do segurar).
+
+/// Espelho de `features.pushToListen` (contracts/settings.ts). Ligado apenas
+/// por update_ptt_gate_from_features (boot + save_feature_toggles).
+static PTT_GATE_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Estado atual do modo Ouvir Segurando.
+fn ptt_gate_enabled() -> bool {
+    PTT_GATE_ENABLED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Atualiza o espelho do toggle a partir do blob de features (shape do
+/// contrato). Chave ausente ou não-booleana = desligado (default do
+/// contrato) — o blob só muda o flag quando traz um booleano.
+fn update_ptt_gate_from_features(features: &serde_json::Value) {
+    let enabled = features
+        .get("pushToListen")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    PTT_GATE_ENABLED.store(enabled, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Espelha as features persistidas no sidecar para os flags do núcleo
+/// (hoje: features.pushToListen → PTT_GATE_ENABLED). Roda no arranque,
+/// quando o sidecar fica pronto — a configuração sobrevive ao reinício.
+fn apply_stored_features(port: u16) {
+    if let Ok(raw) = sidecar_request(port, "GET", "/settings", None) {
+        if let Ok(settings) = unwrap_ipc(raw) {
+            if let Some(features) = settings.get("features") {
+                update_ptt_gate_from_features(features);
+            }
+        }
+    }
+}
+
+/// Seq corrente do contexto — o valor no instante do segurar delimita a
+/// janela do agente (held_context_segments).
+fn context_seq_now() -> u64 {
+    CONTEXT_SEQ.load(Ordering::SeqCst)
+}
+
+/// Segmentos de contexto com seq >= `mark` — exatamente o que foi dito
+/// enquanto o atalho esteve pressionado. Por seq (não por índice): o trim
+/// de 40 entradas do log não distorce a janela, por mais longo o segurar.
+fn held_context_segments(mark: u64) -> Vec<ipc::TranscriptContextSegment> {
+    let log = CONTEXT_LOG.lock().unwrap_or_else(|e| e.into_inner());
+    log.iter()
+        .filter(|(seq, _, _)| *seq >= mark)
+        .enumerate()
+        .map(|(i, (_, speaker, text))| ipc::TranscriptContextSegment {
             speaker: if speaker == "self" {
                 ipc::Speaker::Self_
             } else {
@@ -622,6 +877,7 @@ fn sidecar_request(
             let mut builder = match method.as_str() {
                 "GET" => client.get(&url),
                 "POST" => client.post(&url),
+                "PUT" => client.put(&url),
                 "DELETE" => client.delete(&url),
                 other => return Err(format!("método desconhecido: {other}")),
             };
@@ -668,6 +924,47 @@ fn post_transcript(port: u16, session_id: &str, req: &ipc::AppendTranscriptReque
     }
 }
 
+/// Pré-voo de permissões de áudio (RF-103): sem o TCC de Microfone o
+/// CoreAudio entrega SILÊNCIO digital sem nenhum erro — o sintoma é
+/// "transcrição vazia" e o usuário não tem como saber que é permissão.
+/// Emite um `ray:analysis-hint` e dispara os dialogs do TCC em background.
+/// Retorna `true` se o microfone já está concedido.
+fn ensure_audio_permissions(app: &tauri::AppHandle) -> bool {
+    let perms = permissions::get_permission_status();
+    let mic_missing = perms.microphone != "granted";
+    let speech_missing = perms.speechRecognition != "granted";
+    if !mic_missing && !speech_missing {
+        return true;
+    }
+    let what = if mic_missing && speech_missing {
+        "microfone e reconhecimento de fala"
+    } else if mic_missing {
+        "microfone"
+    } else {
+        "reconhecimento de fala"
+    };
+    let _ = app.emit(
+        "ray:analysis-hint",
+        serde_json::json!({
+            "text": format!(
+                "Sem permissão de {what}: o áudio chega em silêncio e a transcrição fica vazia. Autorize no diálogo do sistema ou em Ajustes › Privacidade e Segurança."
+            )
+        }),
+    );
+    let app_req = app.clone();
+    std::thread::spawn(move || {
+        let mut kinds: Vec<&str> = Vec::new();
+        if mic_missing {
+            kinds.push("microphone");
+        }
+        if speech_missing {
+            kinds.push("speechRecognition");
+        }
+        permissions::request_permissions(app_req, kinds);
+    });
+    !mic_missing
+}
+
 /// Inicia "ouvir reunião": sessão no sidecar + captura dupla (microfone +
 /// áudio do sistema via ScreenCaptureKit) + loop de transcrição que persiste
 /// segmentos e emite `ray:transcript` + loop de ANÁLISE que roda o copiloto
@@ -703,7 +1000,27 @@ fn start_meeting(app: tauri::AppHandle, assistant_id: String) -> Result<String, 
         .to_string();
 
     // Canal VOCÊ: microfone. Canal OUTROS: áudio do sistema (a reunião).
-    audio::start_capture("default");
+    // Sem permissão de mic o stream abre mas chega mudo — não abre; um
+    // watcher inicia a captura no instante em que o TCC é concedido.
+    let mic_ready = ensure_audio_permissions(&app);
+    if mic_ready {
+        audio::start_capture("default");
+    } else {
+        std::thread::spawn(move || {
+            for _ in 0..120 {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if permissions::get_permission_status().microphone == "granted" {
+                    // Streams abertos ANTES do grant ficam mudos (o HAL
+                    // injeta silêncio por processo) — reabrir tudo: mic E
+                    // loopback do sistema.
+                    audio::stop_capture();
+                    audio::start_capture("default");
+                    audio::start_system_capture();
+                    break;
+                }
+            }
+        });
+    }
     if !audio::start_system_capture() {
         let _ = app.emit(
             "ray:analysis-hint",
@@ -718,6 +1035,41 @@ fn start_meeting(app: tauri::AppHandle, assistant_id: String) -> Result<String, 
     let sid = session_id.clone();
     let sid_store = session_id.clone();
     let app_stt = app.clone();
+
+    // [diag] amostrador de captura: RMS por canal via METER_LEVELS (leitura
+    // não destrutiva — NÃO drena a fila do STT) + fila acumulada. Logs vão
+    // para o stderr do app; com o app instalado, lance com:
+    //   open -n --stdout /tmp/ray-app-prod.log --stderr /tmp/ray-app-prod.log \
+    //     /Applications/ray.app
+    {
+        let stop_diag = stop.clone();
+        std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
+            let mut tick = 0u32;
+            loop {
+                if stop_diag.load(Ordering::SeqCst) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                if stop_diag.load(Ordering::SeqCst) {
+                    break;
+                }
+                tick += 5;
+                let meters: Vec<String> = audio::get_meter_levels()
+                    .iter()
+                    .map(|l| format!("{}={:.4}", l.channel_id, l.rms))
+                    .collect();
+                let perms = permissions::get_permission_status();
+                eprintln!(
+                    "[diag] t={tick}s mic={} speech={} meters=[{}] queue={}",
+                    perms.microphone,
+                    perms.speechRecognition,
+                    meters.join(" "),
+                    audio::pcm_queue_len()
+                );
+            }
+        });
+    }
 
     std::thread::spawn(move || {
         use std::sync::atomic::Ordering;
@@ -751,7 +1103,7 @@ fn start_meeting(app: tauri::AppHandle, assistant_id: String) -> Result<String, 
         }
     });
 
-    // Loop de ANÁLISE (T-300s): a cada 25s roda o copiloto com o contexto
+    // Loop de ANÁLISE (T-300s): a cada 10s roda o copiloto com o contexto
     // recente (mínimo 2 segmentos novos). A credencial é resolvida do cofre
     // como no suggest manual (ADR-003) — usa a primeira disponível.
     let app_analysis = app.clone();
@@ -770,14 +1122,27 @@ fn start_meeting(app: tauri::AppHandle, assistant_id: String) -> Result<String, 
             if stop_analysis.load(Ordering::SeqCst) {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(25_000));
+            std::thread::sleep(std::time::Duration::from_millis(10_000));
             if stop_analysis.load(Ordering::SeqCst) {
                 break;
             }
+            // Modo Ouvir Segurando (features.pushToListen): o agente NÃO
+            // recebe contexto por conta própria — a análise roda só quando
+            // o usuário solta o atalho com trecho novo (ptt_release). A
+            // transcrição segue contínua: segmentos seguem indo para o
+            // CONTEXT_LOG, ray:transcript e ao banco.
+            if ptt_gate_enabled() {
+                continue;
+            }
             let (context, new_count) = {
                 let log = CONTEXT_LOG.lock().unwrap_or_else(|e| e.into_inner());
-                let recent: Vec<(String, String)> =
-                    log.iter().rev().take(12).rev().cloned().collect();
+                let recent: Vec<(String, String)> = log
+                    .iter()
+                    .rev()
+                    .take(12)
+                    .rev()
+                    .map(|(_, speaker, text)| (speaker.clone(), text.clone()))
+                    .collect();
                 let new_count = log.len().saturating_sub(last_analyzed_len);
                 (recent, new_count)
             };
@@ -789,18 +1154,7 @@ fn start_meeting(app: tauri::AppHandle, assistant_id: String) -> Result<String, 
                 .unwrap_or_else(|e| e.into_inner())
                 .len();
 
-            let Ok(raw) = sidecar_request(port, "GET", "/credentials", None) else {
-                continue;
-            };
-            let Ok(creds) = unwrap_ipc(raw) else {
-                continue;
-            };
-            let Some(cred) = creds
-                .get("credentials")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
-                .cloned()
-            else {
+            let Some(cred) = preferred_credential(port) else {
                 let _ = app_analysis.emit(
                     "ray:analysis-hint",
                     serde_json::json!({ "text": "Configure uma API key para análise em tempo real." }),
@@ -922,6 +1276,12 @@ fn stop_meeting(app: tauri::AppHandle) -> Result<(), String> {
             eprintln!("[ray] sessions/end falhou: {e}");
         }
     }
+    // Libera os motores STT: os modelos on-device (Apple Speech) ficam
+    // residentes enquanto o motor vive — segurá-los ociosos entre reuniões
+    // custa centenas de MB. O próximo uso recria sob demanda. Descarta também
+    // a janela parcial do canal OUTROS, que sem isso vazaria para a sessão
+    // seguinte.
+    stt::reset_engine();
     let _ = app.emit("ray:meeting-stopped", serde_json::json!({}));
     Ok(())
 }
@@ -1322,14 +1682,54 @@ fn first_credential(port: u16) -> Option<serde_json::Value> {
         .cloned()
 }
 
+/// Slot de credencial atribuído à função ANÁLISE na aba Modelos (ex.:
+/// modelo personalizado). Vazio = primeira credencial salva. A UI sincroniza
+/// no arranque e a cada troca (o core não lê o Web Storage da UI).
+static ANALYSIS_CREDENTIAL_SLOT: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+#[tauri::command]
+fn set_analysis_credential_slot(slot: String) -> Result<(), String> {
+    *ANALYSIS_CREDENTIAL_SLOT.lock().unwrap_or_else(|e| e.into_inner()) = slot;
+    Ok(())
+}
+
+/// Credencial preferida para o agente: a do slot atribuído à função Análise
+/// (modelos personalizados); sem atribuição (ou slot inexistente), a primeira
+/// credencial salva.
+fn preferred_credential(port: u16) -> Option<serde_json::Value> {
+    let raw = sidecar_request(port, "GET", "/credentials", None).ok()?;
+    let creds = unwrap_ipc(raw).ok()?;
+    let list = creds
+        .get("credentials")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let slot = ANALYSIS_CREDENTIAL_SLOT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if !slot.is_empty() {
+        if let Some(found) = list
+            .iter()
+            .find(|c| c.get("slot").and_then(|v| v.as_str()) == Some(slot.as_str()))
+        {
+            return Some(found.clone());
+        }
+    }
+    list.first().cloned()
+}
+
 /// Roda o copiloto a partir de um atalho: monta o SuggestRequest com o
 /// contexto de transcrição acumulado (se houver reunião ativa) e faz o
-/// streaming para o Overlay via `suggest-stream`.
+/// streaming para o Overlay via `suggest-stream`. `context_override`
+/// substitui o "últimos 12 segmentos" — usado pelo soltar do modo Ouvir
+/// Segurando, que entrega ao agente SÓ o trecho do intervalo do segurar.
 fn shortcut_suggest(
     app: &tauri::AppHandle,
     trigger: ipc::SuggestionTrigger,
     screenshots: Option<Vec<String>>,
     user_prompt: Option<String>,
+    context_override: Option<Vec<ipc::TranscriptContextSegment>>,
 ) {
     let port = SIDECAR_PORT.load(Ordering::Acquire);
     if port == 0 {
@@ -1339,7 +1739,7 @@ fn shortcut_suggest(
         );
         return;
     }
-    let Some(cred) = first_credential(port) else {
+    let Some(cred) = preferred_credential(port) else {
         let _ = app.emit(
             "ray:analysis-hint",
             serde_json::json!({ "text": "Configure uma API key em Configurações para usar o copiloto." }),
@@ -1368,7 +1768,7 @@ fn shortcut_suggest(
         session_id,
         assistant_id,
         trigger,
-        context: recent_context_segments(12),
+        context: context_override.unwrap_or_else(|| recent_context_segments(12)),
         user_prompt,
         screenshots,
         selection_text: None,
@@ -1428,12 +1828,26 @@ static PTT_SESSION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(Non
 /// True enquanto o atalho push-to-listen está pressionado.
 static PTT_HOLDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// True se o segurar CORRENTE é do modo gated (reunião ativa + features
+/// .pushToListen): a transcrição já roda pela reunião, então segurar apenas
+/// abre o portão de contexto e soltar analisa o trecho do intervalo.
+static PTT_GATED_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Seq do contexto no instante do segurar gated — delimita o trecho que o
+/// agente recebe ao soltar (held_context_segments).
+static PTT_MARK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Modo push-to-listen (RF-604): captura o áudio da conversa APENAS enquanto
 /// o atalho está pressionado; ao soltar, para os streams (a RAM de captura
 /// sai no instante do soltar), transcreve o trecho acumulado e dispara a
 /// análise do agente — o resultado faz streaming para o Overlay flutuante.
 /// É o caminho leve para quem não quer gravação contínua: nada de loop de
 /// STT, captura dupla ou ciclo de screenshots rodando o tempo todo.
+///
+/// Com features.pushToListen LIGADO e reunião contínua ativa, o segurar muda
+/// de sentido: a escuta já é contínua (a reunião é dona das filas), então
+/// segurar apenas LIBERA o contexto ao agente e soltar analisa o trecho do
+/// intervalo — o app transcreve o tempo todo, o agente só ouve segurando.
 fn dispatch_push_to_listen(app: &tauri::AppHandle, pressed: bool) {
     if pressed {
         ptt_start_hold(app);
@@ -1442,7 +1856,9 @@ fn dispatch_push_to_listen(app: &tauri::AppHandle, pressed: bool) {
     }
 }
 
-/// Pressionou: garante sessão e liga a captura dupla (microfone + sistema).
+/// Pressionou: em reunião + toggle ligado, abre o portão de contexto
+/// (gated); sem reunião, garante sessão e liga a captura dupla
+/// (microfone + sistema).
 fn ptt_start_hold(app: &tauri::AppHandle) {
     use std::sync::atomic::Ordering;
     // Key repeat do SO dispara Pressed várias vezes — só a primeira liga.
@@ -1456,6 +1872,17 @@ fn ptt_start_hold(app: &tauri::AppHandle) {
         .as_ref()
         .is_some()
     {
+        // Toggle ligado: o segurar é o portão do agente (não há captura a
+        // ligar — a reunião já captura; a transcrição segue contínua).
+        if ptt_gate_enabled() {
+            PTT_GATED_HOLD.store(true, Ordering::SeqCst);
+            PTT_MARK.store(context_seq_now(), Ordering::SeqCst);
+            let _ = app.emit(
+                "ray:analysis-hint",
+                serde_json::json!({ "text": "Agente ouvindo… solte o atalho para analisar o trecho." }),
+            );
+            return;
+        }
         PTT_HOLDING.store(false, Ordering::SeqCst);
         let _ = app.emit(
             "ray:analysis-hint",
@@ -1505,7 +1932,11 @@ fn ptt_start_hold(app: &tauri::AppHandle) {
         }
     }
     // Captura só enquanto segurando: VOCÊ (microfone) + OUTROS (sistema).
-    audio::start_capture("default");
+    // Sem permissão de mic o stream abriria mudo (silêncio sem erro) —
+    // avisa e captura apenas o canal OUTROS.
+    if ensure_audio_permissions(app) {
+        audio::start_capture("default");
+    }
     if !audio::start_system_capture() {
         let _ = app.emit(
             "ray:analysis-hint",
@@ -1518,11 +1949,38 @@ fn ptt_start_hold(app: &tauri::AppHandle) {
     );
 }
 
-/// Soltou: desliga a captura, transcreve o trecho (Self + Others) e dispara
-/// a análise do agente com o contexto atualizado.
+/// Soltou: no modo gated (reunião + features.pushToListen) fecha o portão e
+/// analisa SÓ o trecho transcritos durante o segurar; no modo standalone,
+/// desliga a captura, transcreve o trecho (Self + Others) e dispara a
+/// análise do agente com o contexto atualizado.
 fn ptt_release(app: &tauri::AppHandle) {
     use std::sync::atomic::Ordering;
     if !PTT_HOLDING.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    // Gated: a transcrição foi contínua (loop da reunião) — nada de streams
+    // para parar nem filas para drenar. O agente recebe exatamente os
+    // segmentos do intervalo do segurar (marca → soltar), nada antes dele.
+    if PTT_GATED_HOLD.swap(false, Ordering::SeqCst) {
+        let mark = PTT_MARK.load(Ordering::SeqCst);
+        let app_t = app.clone();
+        std::thread::spawn(move || {
+            let segments = held_context_segments(mark);
+            if segments.is_empty() {
+                let _ = app_t.emit(
+                    "ray:analysis-hint",
+                    serde_json::json!({ "text": "Nada novo foi dito enquanto o atalho esteve pressionado." }),
+                );
+                return;
+            }
+            shortcut_suggest(
+                &app_t,
+                ipc::SuggestionTrigger::AnalyzeConversation,
+                None,
+                None,
+                Some(segments),
+            );
+        });
         return;
     }
     // Para os streams JÁ no handler do atalho: buffers do cpal e filas de
@@ -1559,11 +2017,16 @@ fn ptt_release(app: &tauri::AppHandle) {
                 }
             }
         }
+        // Trecho transcrito e postado: solta os motores STT — a RAM dos
+        // modelos (Apple Speech) não fica residente entre um segurar e outro;
+        // o próximo push-to-listen recria sob demanda.
+        stt::reset_engine();
         // O trecho recém-transcrito são os ÚLTIMOS segmentos do contexto —
         // é exatamente o que o agente analisa.
         shortcut_suggest(
             &app_t,
             ipc::SuggestionTrigger::AnalyzeConversation,
+            None,
             None,
             None,
         );
@@ -1590,6 +2053,7 @@ fn dispatch_shortcut(app: &tauri::AppHandle, command: ShortcutCommand) {
                         app,
                         ipc::SuggestionTrigger::ScreenCapture,
                         Some(vec![image]),
+                        None,
                         None,
                     );
                 }
@@ -1624,6 +2088,7 @@ fn dispatch_shortcut(app: &tauri::AppHandle, command: ShortcutCommand) {
             shortcut_suggest(
                 app,
                 ipc::SuggestionTrigger::AnalyzeConversation,
+                None,
                 None,
                 None,
             );
@@ -1891,6 +2356,20 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            // [diag] estado de permissões e dispositivos de entrada no boot.
+            {
+                let p = permissions::get_permission_status();
+                eprintln!(
+                    "[diag] boot: mic={} speech={} screen={} ax={} inputs={:?} loopback={}",
+                    p.microphone,
+                    p.speechRecognition,
+                    p.screenRecording,
+                    p.accessibility,
+                    audio::list_input_devices().into_iter().map(|d| d.name).collect::<Vec<_>>(),
+                    audio::system_capture_available(),
+                );
+            }
+
             // Tray na barra de menu: presenca permanente do app sem Dock.
             build_tray(app.handle())?;
 
@@ -1902,12 +2381,21 @@ pub fn run() {
             windows::init_app_handle(app.handle().clone());
             // macOS: janela sem decoracoes nao e movivel por padrao.
             // isMovableByWindowBackground=true delega o drag ao SO sem JS.
+            // A overlay precisa do mesmo tratamento da appbar: sem isso o drag
+            // nao inicia — com focus:false o primeiro clique so ativa a janela
+            // e o mousedown nunca chega ao webview (startDragging/data-tauri-
+            // drag-region dependem desse evento; o caminho nativo, nao).
             if let Some(appbar) = app.get_webview_window("appbar") {
                 windows::enable_movable_by_background(&appbar);
             }
+            if let Some(overlay) = app.get_webview_window("overlay") {
+                windows::enable_movable_by_background(&overlay);
+            }
             // Stealth ativo por padrao: o uso completo e o default e as
-            // janelas nascem fora da captura de tela (ADR-008).
-            for label in ["appbar", "main", "notch"] {
+            // janelas nascem fora da captura de tela (ADR-008). O overlay
+            // tambem precisa (ADR-008: "a home nao precisa de stealth; o
+            // overlay sim").
+            for label in ["appbar", "main", "notch", "overlay"] {
                 if app.get_webview_window(label).is_some() {
                     windows::set_capture_excluded(label, true);
                 }
@@ -1941,6 +2429,10 @@ pub fn run() {
                         // Atalhos persistidos (RF-601): substitui os defaults
                         // registrados no setup pelo mapa salvo no sidecar.
                         apply_stored_shortcuts(&handle, s.port);
+                        // Features persistidas (RF-700): espelha os flags que
+                        // o núcleo consome (features.pushToListen → gate do
+                        // agente) — a configuração sobrevive ao reinício.
+                        apply_stored_features(s.port);
                     }
                     Err(e) => eprintln!("[ray] sidecar falhou ao iniciar: {e}"),
                 }
@@ -1966,6 +2458,7 @@ pub fn run() {
             copy_logs_to_clipboard,
             save_credential,
             delete_credential,
+            set_analysis_credential_slot,
             get_provider_statuses,
             get_default_assistant,
             start_meeting,

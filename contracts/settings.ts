@@ -28,7 +28,7 @@
 // Toggles de recursos de sessão (RF-700)
 // ---------------------------------------------------------------------
 
-/** Nomes canônicos dos toggles de recursos (RF-701..706). */
+/** Nomes canônicos dos toggles de recursos (RF-701..706 + pushToListen). */
 export const FEATURE_TOGGLE_NAMES = [
   "autoScroll", // RF-701 — Rolagem Automática
   "selectToPrompt", // RF-702 — Selecionar para Prompt
@@ -36,6 +36,10 @@ export const FEATURE_TOGGLE_NAMES = [
   "notchExperience", // RF-704 — Experiência do Notch
   "autoCompaction", // RF-705 — Compactação automática
   "quickScreenshotAnalysis", // RF-706 — Análise Rápida de Screenshots
+  // Ouvir Segurando: a escuta/transcrição continua contínua, mas o agente
+  // só recebe o contexto (e responde) enquanto o atalho pushToListen está
+  // pressionado — ao soltar, analisa só o trecho do intervalo.
+  "pushToListen",
 ] as const;
 
 export type FeatureToggleName = (typeof FEATURE_TOGGLE_NAMES)[number];
@@ -47,6 +51,10 @@ export type FeatureToggles = Record<FeatureToggleName, boolean>;
  * Defaults de `Settings.features`. Nenhum RF-700 documenta um toggle
  * nascendo desligado, então o default é "tudo ligado" — decisão de
  * produto sinalizável se um recurso específico precisar nascer opt-in.
+ * EXCEÇÃO: `pushToListen` nasce DESLIGADO por decisão de produto — ele
+ * muda o comportamento da análise automática (o agente só recebe contexto
+ * segurando o atalho), então é opt-in; sem o toggle o app mantém o
+ * comportamento contínuo de sempre.
  */
 export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
   autoScroll: true,
@@ -55,6 +63,7 @@ export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
   notchExperience: true,
   autoCompaction: true,
   quickScreenshotAnalysis: true,
+  pushToListen: false,
 };
 
 // ---------------------------------------------------------------------
@@ -86,13 +95,15 @@ export const SHORTCUT_COMMANDS = [
   "captureScreen", // Capturar Tela (padrão: Cmd+E)
   "toggleVoiceRecording", // Gravação de Voz (padrão: Cmd+D)
   "toggleMicCapture", // Alternar Captura do Microfone (padrão: Cmd+Shift+D)
-  "pushToListen", // Ouvir Segurando: captura só enquanto pressionado; soltar transcreve e dispara a análise (padrão: Alt+Space)
+  "pushToListen", // Ouvir Segurando (padrão: Alt+Space). Sem reunião: captura só enquanto pressionado; soltar transcreve e analisa. Com reunião ativa E o toggle features.pushToListen ligado: a transcrição segue contínua e soltar entrega ao agente SÓ o trecho do intervalo
   "scrollUp", // Rolar Cima (padrão: Cmd+ArrowUp)
   "scrollDown", // Rolar Baixo (padrão: Cmd+ArrowDown)
   "notchPreviousInsight", // Insight Anterior do Notch (padrão: Cmd+ArrowLeft)
   "notchNextInsight", // Insight Próximo do Notch (padrão: Cmd+ArrowRight)
   "previousResponse", // Resposta Anterior (padrão: Cmd+Alt+ArrowUp)
   "nextResponse", // Resposta Próxima (padrão: Cmd+Alt+ArrowDown)
+  "overlayScrollUp", // Rolar Cima do Overlay (padrão: Cmd+Alt+Shift+ArrowUp)
+  "overlayScrollDown", // Rolar Baixo do Overlay (padrão: Cmd+Alt+Shift+ArrowDown)
   "toggleActionBar", // Alternar Barra de Ações (padrão: Cmd+M)
   "toggleAlwaysOnTop", // Sempre no Topo (padrão: Cmd+Shift+A)
   "increaseOpacity", // Aumentar Opacidade (padrão: Cmd+Shift+=)
@@ -143,6 +154,8 @@ export const DEFAULT_SHORTCUTS: ShortcutMap = {
   notchNextInsight: { enabled: true, modifiers: ["Cmd"], key: "ArrowRight" },
   previousResponse: { enabled: true, modifiers: ["Cmd", "Alt"], key: "ArrowUp" },
   nextResponse: { enabled: true, modifiers: ["Cmd", "Alt"], key: "ArrowDown" },
+  overlayScrollUp: { enabled: true, modifiers: ["Cmd", "Alt", "Shift"], key: "ArrowUp" },
+  overlayScrollDown: { enabled: true, modifiers: ["Cmd", "Alt", "Shift"], key: "ArrowDown" },
   toggleActionBar: { enabled: true, modifiers: ["Cmd"], key: "M" },
   toggleAlwaysOnTop: { enabled: true, modifiers: ["Cmd", "Shift"], key: "A" },
   increaseOpacity: { enabled: true, modifiers: ["Cmd", "Shift"], key: "=" },

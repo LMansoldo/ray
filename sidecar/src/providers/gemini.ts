@@ -16,7 +16,7 @@ import type {
 } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com";
-const DEFAULT_MODEL = "gemini-2.5-pro";
+const DEFAULT_MODEL = "gemini-3.7-flash";
 
 function buildBaseUrl(credential: InjectedCredential): string {
   return credential.baseUrl ?? DEFAULT_BASE_URL;

@@ -35,9 +35,12 @@ pub enum ShortcutCommand {
     CaptureScreen,
     ToggleVoiceRecording,
     ToggleMicCapture,
-    /// Push-to-listen (RF-604): captura só enquanto pressionado; ao soltar,
-    /// transcreve o trecho e dispara a análise do agente. É o único comando
-    /// com comportamento no keypress E no release.
+    /// Push-to-listen (RF-604): sem reunião, captura só enquanto pressionado;
+    /// ao soltar, transcreve o trecho e dispara a análise do agente. Com
+    /// reunião ativa e features.pushToListen ligado, segurar apenas libera o
+    /// contexto ao agente e soltar analisa o trecho do intervalo (a escuta
+    /// contínua não para). É o único comando com comportamento no keypress E
+    /// no release.
     PushToListen,
     ScrollUp,
     ScrollDown,
@@ -45,6 +48,10 @@ pub enum ShortcutCommand {
     NotchNextInsight,
     PreviousResponse,
     NextResponse,
+    /// Rolagem do corpo do Overlay (DIGA ISSO) — a janela flutuante é quem
+    /// consome o ray:shortcut correspondente.
+    OverlayScrollUp,
+    OverlayScrollDown,
     ToggleActionBar,
     ToggleAlwaysOnTop,
     IncreaseOpacity,
@@ -64,7 +71,7 @@ pub type ShortcutMap = HashMap<ShortcutCommand, Option<ShortcutBinding>>;
 /// Teclas unicas permitidas sem modificador (contracts/settings.ts:75).
 pub const ALLOWED_MODIFIERLESS_KEYS: &[&str] = &["CapsLock"];
 
-/// Todos os 20 comandos de atalho (contracts/settings.ts:84-104).
+/// Todos os 22 comandos de atalho (contracts/settings.ts).
 pub const ALL_SHORTCUT_COMMANDS: &[ShortcutCommand] = &[
     ShortcutCommand::AskOrSend,
     ShortcutCommand::CaptureScreen,
@@ -77,6 +84,8 @@ pub const ALL_SHORTCUT_COMMANDS: &[ShortcutCommand] = &[
     ShortcutCommand::NotchNextInsight,
     ShortcutCommand::PreviousResponse,
     ShortcutCommand::NextResponse,
+    ShortcutCommand::OverlayScrollUp,
+    ShortcutCommand::OverlayScrollDown,
     ShortcutCommand::ToggleActionBar,
     ShortcutCommand::ToggleAlwaysOnTop,
     ShortcutCommand::IncreaseOpacity,
@@ -240,6 +249,8 @@ pub fn command_to_action_name(command: ShortcutCommand) -> &'static str {
         ShortcutCommand::NotchNextInsight => "notchNextInsight",
         ShortcutCommand::PreviousResponse => "previousResponse",
         ShortcutCommand::NextResponse => "nextResponse",
+        ShortcutCommand::OverlayScrollUp => "overlayScrollUp",
+        ShortcutCommand::OverlayScrollDown => "overlayScrollDown",
         ShortcutCommand::ToggleActionBar => "toggleActionBar",
         ShortcutCommand::ToggleAlwaysOnTop => "toggleAlwaysOnTop",
         ShortcutCommand::IncreaseOpacity => "increaseOpacity",
@@ -378,6 +389,26 @@ pub fn build_default_shortcuts() -> ShortcutMap {
         (
             ShortcutCommand::NextResponse,
             vec![ShortcutModifier::Cmd, ShortcutModifier::Alt],
+            "ArrowDown",
+        ),
+        // Rolagem do Overlay: Cmd+Alt+Shift+Setas — sem conflito com as
+        // setas do notch (Cmd), das respostas (Cmd+Alt) e do modal (Cmd+Shift).
+        (
+            ShortcutCommand::OverlayScrollUp,
+            vec![
+                ShortcutModifier::Cmd,
+                ShortcutModifier::Alt,
+                ShortcutModifier::Shift,
+            ],
+            "ArrowUp",
+        ),
+        (
+            ShortcutCommand::OverlayScrollDown,
+            vec![
+                ShortcutModifier::Cmd,
+                ShortcutModifier::Alt,
+                ShortcutModifier::Shift,
+            ],
             "ArrowDown",
         ),
         (
@@ -819,6 +850,8 @@ mod tests {
                 ShortcutCommand::NotchNextInsight => "notchNextInsight",
                 ShortcutCommand::PreviousResponse => "previousResponse",
                 ShortcutCommand::NextResponse => "nextResponse",
+                ShortcutCommand::OverlayScrollUp => "overlayScrollUp",
+                ShortcutCommand::OverlayScrollDown => "overlayScrollDown",
                 ShortcutCommand::ToggleActionBar => "toggleActionBar",
                 ShortcutCommand::ToggleAlwaysOnTop => "toggleAlwaysOnTop",
                 ShortcutCommand::IncreaseOpacity => "increaseOpacity",
@@ -838,11 +871,11 @@ mod tests {
     }
 
     #[test]
-    fn all_commands_count_is_20() {
+    fn all_commands_count_is_22() {
         assert_eq!(
             ALL_SHORTCUT_COMMANDS.len(),
-            20,
-            "must have exactly 20 shortcut commands per contracts/settings.ts"
+            22,
+            "must have exactly 22 shortcut commands per contracts/settings.ts"
         );
     }
 
@@ -948,11 +981,11 @@ mod tests {
 
         // Registrar antigo limpo, novos defaults registrados
         let registered = mock.registered_combos();
-        // 17 bindings padrao devem ter sido registrados
+        // 19 bindings padrao devem ter sido registrados
         assert_eq!(
             registered.len(),
-            17,
-            "must register 17 default bindings after reset"
+            19,
+            "must register 19 default bindings after reset"
         );
     }
 
@@ -966,8 +999,8 @@ mod tests {
 
         assert_eq!(
             map.len(),
-            20,
-            "reset_to_defaults must produce a 20-entry map"
+            22,
+            "reset_to_defaults must produce a 22-entry map"
         );
 
         // 3 null bindings
@@ -1034,14 +1067,14 @@ mod tests {
     }
 
     #[test]
-    fn default_shortcuts_pin_all_16_combos() {
-        // RF-604: pin all 16 default combos from contracts/settings.ts:133-153.
+    fn default_shortcuts_pin_all_18_combos() {
+        // RF-604: pin the default combos from contracts/settings.ts.
         // This prevents a GREEN implementation from mis-copying combos.
         let mock = MockRegistrar::new();
         let mut map = HashMap::new();
         let _ = reset_to_defaults(&mut map, &mock);
 
-        // All 16 enabled defaults — exact (command, modifiers, key) per contract
+        // All enabled defaults — exact (command, modifiers, key) per contract
         let expected: Vec<(ShortcutCommand, Vec<ShortcutModifier>, &str)> = vec![
             (ShortcutCommand::AskOrSend, vec![ShortcutModifier::Cmd], "Enter"),
             (ShortcutCommand::CaptureScreen, vec![ShortcutModifier::Cmd], "E"),
@@ -1053,6 +1086,8 @@ mod tests {
             (ShortcutCommand::NotchNextInsight, vec![ShortcutModifier::Cmd], "ArrowRight"),
             (ShortcutCommand::PreviousResponse, vec![ShortcutModifier::Cmd, ShortcutModifier::Alt], "ArrowUp"),
             (ShortcutCommand::NextResponse, vec![ShortcutModifier::Cmd, ShortcutModifier::Alt], "ArrowDown"),
+            (ShortcutCommand::OverlayScrollUp, vec![ShortcutModifier::Cmd, ShortcutModifier::Alt, ShortcutModifier::Shift], "ArrowUp"),
+            (ShortcutCommand::OverlayScrollDown, vec![ShortcutModifier::Cmd, ShortcutModifier::Alt, ShortcutModifier::Shift], "ArrowDown"),
             (ShortcutCommand::ToggleActionBar, vec![ShortcutModifier::Cmd], "M"),
             (ShortcutCommand::ToggleAlwaysOnTop, vec![ShortcutModifier::Cmd, ShortcutModifier::Shift], "A"),
             (ShortcutCommand::IncreaseOpacity, vec![ShortcutModifier::Cmd, ShortcutModifier::Shift], "="),

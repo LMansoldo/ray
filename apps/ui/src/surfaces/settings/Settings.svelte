@@ -220,6 +220,125 @@
     }
   }
 
+  // ── Modelos personalizados (URL + modelo + key, RF-401) ──────────────
+
+  // Endpoint próprio compatível com OpenAI (/v1/chat/completions) ou
+  // Anthropic (/v1/messages). A key NUNCA toca o Web Storage (ADR-003):
+  // cruza uma única vez no payload credentialSave — o cofre nativo guarda o
+  // segredo e o slot 'custom-<id>' amarra os metadados à credencial.
+  type CustomModelKind = Extract<ProviderKind, 'GENERIC' | 'ANTHROPIC'>
+
+  interface CustomModelEntry {
+    id: string
+    slot: `custom-${string}`
+    label: string
+    baseUrl: string
+    model: string
+    kind: CustomModelKind
+  }
+
+  // A chave 'ray_custom_models' é allowlistada no teste de integridade
+  // (no-direct-sidecar.test.ts) — e citada literalmente nas chamadas de
+  // storage, que são varridas linha a linha.
+
+  function readCustomModels(): CustomModelEntry[] {
+    try {
+      const raw = window.localStorage.getItem?.('ray_custom_models')
+      if (!raw) {
+        return []
+      }
+      const parsed: unknown = JSON.parse(raw)
+      if (!Array.isArray(parsed)) {
+        return []
+      }
+      return parsed.filter((entry): entry is CustomModelEntry => {
+        const candidate = entry as Partial<CustomModelEntry> | null
+        return (
+          !!candidate &&
+          typeof candidate.id === 'string' &&
+          typeof candidate.slot === 'string' &&
+          typeof candidate.label === 'string' &&
+          typeof candidate.baseUrl === 'string' &&
+          typeof candidate.model === 'string' &&
+          (candidate.kind === 'GENERIC' || candidate.kind === 'ANTHROPIC')
+        )
+      })
+    } catch {
+      return []
+    }
+  }
+
+  let customModels = $state<CustomModelEntry[]>(readCustomModels())
+
+  let customLabel = $state('')
+  let customBaseUrl = $state('')
+  let customModelName = $state('')
+  let customKey = $state('')
+  let customFormat = $state<CustomModelKind>('GENERIC')
+
+  const canAddCustomModel = $derived(
+    customLabel.trim() !== '' &&
+      /^https?:\/\/.+/.test(customBaseUrl.trim()) &&
+      customModelName.trim() !== '' &&
+      customKey !== '',
+  )
+
+  function persistCustomModels(): void {
+    window.localStorage.setItem?.('ray_custom_models', JSON.stringify(customModels))
+  }
+
+  function addCustomModel(): void {
+    if (!canAddCustomModel) {
+      return
+    }
+    const id = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`).slice(0, 8)
+    const entry: CustomModelEntry = {
+      id,
+      slot: `custom-${id}`,
+      label: customLabel.trim(),
+      baseUrl: customBaseUrl.trim(),
+      model: customModelName.trim(),
+      kind: customFormat,
+    }
+    dispatchSettingsAction({
+      type: 'credentialSave',
+      slot: entry.slot,
+      kind: entry.kind,
+      connectionMode: entry.kind === 'GENERIC' ? 'COMPATIBLE_ENDPOINT' : 'API_KEY',
+      secret: customKey,
+      baseUrl: entry.baseUrl,
+    })
+    customModels = [...customModels, entry]
+    persistCustomModels()
+    // O segredo não circula depois do payload — formulário limpo.
+    customLabel = ''
+    customBaseUrl = ''
+    customModelName = ''
+    customKey = ''
+    customFormat = 'GENERIC'
+  }
+
+  async function deleteCustomModel(entry: CustomModelEntry): Promise<void> {
+    try {
+      await invoke('delete_credential', { slot: entry.slot })
+      customModels = customModels.filter((model) => model.id !== entry.id)
+      persistCustomModels()
+      // Funções atribuídas a este modelo voltam a ficar sem provedor.
+      for (const fn of FUNCTIONS) {
+        if (modelSelections[fn] === `custom:${entry.id}`) {
+          modelSelections[fn] = ''
+          modelInputs[fn] = ''
+        }
+      }
+      persistModels()
+      void emit('ray:credentials-changed', { slot: entry.slot, valid: undefined }).catch(
+        console.error,
+      )
+    } catch {
+      // core/sidecar indisponível — mantém o estado atual
+    }
+  }
+
   // ── Modelos (RF-301/302/303/404) ──────────────────────────────────────
 
   const FUNCTIONS: readonly AiFunction[] = ['TRANSCRIPTION', 'ANALYSIS', 'TRANSLATION']
@@ -252,6 +371,8 @@
   interface StoredModelEntry {
     kind: ProviderKind
     model: string
+    /** Presente quando a entrada é um modelo personalizado (ray_custom_models). */
+    customId?: string
   }
   type StoredModels = Record<AiFunction, StoredModelEntry | null>
 
@@ -275,6 +396,9 @@
 
   function seedKind(fn: AiFunction): string {
     const entry = storedModels[fn]
+    if (entry?.customId && customModels.some((model) => model.id === entry.customId)) {
+      return `custom:${entry.customId}`
+    }
     if (entry && isProviderKind(entry.kind)) {
       return entry.kind
     }
@@ -314,8 +438,15 @@
   /** Mapa corrente por função — null quando a função está sem provedor. */
   function currentModels(): StoredModels {
     const build = (fn: AiFunction): StoredModelEntry | null => {
-      const kind = modelSelections[fn]
-      return isProviderKind(kind) ? { kind, model: modelInputs[fn] } : null
+      const selection = modelSelections[fn]
+      if (selection.startsWith('custom:')) {
+        const entry = customModels.find((model) => model.id === selection.slice('custom:'.length))
+        if (!entry) {
+          return null
+        }
+        return { kind: entry.kind, model: modelInputs[fn] || entry.model, customId: entry.id }
+      }
+      return isProviderKind(selection) ? { kind: selection, model: modelInputs[fn] } : null
     }
     return {
       TRANSCRIPTION: build('TRANSCRIPTION'),
@@ -333,8 +464,26 @@
 
   function changeFunctionProvider(event: Event, fn: AiFunction): void {
     const select = event.currentTarget as HTMLSelectElement
-    modelSelections[fn] = select.value
-    if (!isProviderKind(select.value)) {
+    const value = select.value
+    modelSelections[fn] = value
+    if (value.startsWith('custom:')) {
+      const entry = customModels.find((model) => model.id === value.slice('custom:'.length))
+      if (!entry) {
+        // Modelo removido: função volta a ficar sem provedor.
+        persistModels()
+        return
+      }
+      modelInputs[fn] = entry.model
+      dispatchSettingsAction({
+        type: 'functionProviderChange',
+        function: fn,
+        kind: entry.kind,
+        model: entry.model,
+      })
+      persistModels()
+      return
+    }
+    if (!isProviderKind(value)) {
       // Seleção vazia: função volta a ficar sem provedor (persiste null).
       persistModels()
       return
@@ -342,7 +491,7 @@
     dispatchSettingsAction({
       type: 'functionProviderChange',
       function: fn,
-      kind: select.value,
+      kind: value,
       model: modelInputs[fn],
     })
     persistModels()
@@ -432,6 +581,7 @@
     notchExperience: 'Experiência do Notch',
     autoCompaction: 'Compactação automática',
     quickScreenshotAnalysis: 'Análise Rápida de Screenshots',
+    pushToListen: 'Ouvir Segurando (o agente só escuta segurando o atalho)',
   }
 
   // Semeados do feed e re-sincronizados quando loadSettingsState resolve
@@ -465,6 +615,8 @@
     notchNextInsight: 'Insight Próximo do Notch',
     previousResponse: 'Resposta Anterior',
     nextResponse: 'Resposta Próxima',
+    overlayScrollUp: 'Rolar Cima do Overlay',
+    overlayScrollDown: 'Rolar Baixo do Overlay',
     toggleActionBar: 'Alternar Barra de Ações',
     toggleAlwaysOnTop: 'Sempre no Topo',
     increaseOpacity: 'Aumentar Opacidade',
@@ -745,11 +897,94 @@
 
   {#if activeTab === 'models'}
     <section class="settings__panel" data-settings-panel="models">
+      <div class="settings__custom" data-custom-models>
+        <h3 class="settings__function-title">Modelos personalizados</h3>
+        <p class="settings__function-empty" data-custom-models-hint>
+          Endpoint próprio compatível com OpenAI ou Anthropic — informe a URL, o nome do modelo e a
+          chave.
+        </p>
+        {#each customModels as entry (entry.id)}
+          <div class="pcard" data-custom-model={entry.id}>
+            <div class="phdr">
+              <span class="plogo" aria-hidden="true">{plogoInitials(entry.label)}</span>
+              <span class="pmeta">
+                <span class="pname">{entry.label}</span>
+                <span class="pmode">
+                  {entry.model} · {entry.kind === 'GENERIC'
+                    ? 'compatível OpenAI'
+                    : 'compatível Anthropic'}
+                </span>
+              </span>
+            </div>
+            <p class="pmode" data-custom-model-url>{entry.baseUrl}</p>
+            <div class="key-row">
+              <button
+                type="button"
+                class="btn btn--danger"
+                data-custom-model-delete={entry.id}
+                onclick={() => void deleteCustomModel(entry)}
+              >
+                Excluir
+              </button>
+            </div>
+          </div>
+        {/each}
+        <div class="settings__custom-form" data-custom-model-form>
+          <input
+            class="key-input"
+            data-custom-label-input
+            type="text"
+            placeholder="Nome (ex.: Meu servidor local)"
+            bind:value={customLabel}
+          />
+          <input
+            class="key-input"
+            data-custom-baseurl-input
+            type="text"
+            placeholder="URL base (ex.: https://api.exemplo.com)"
+            bind:value={customBaseUrl}
+          />
+          <input
+            class="key-input"
+            data-custom-model-name-input
+            type="text"
+            placeholder="Nome do modelo (ex.: llama-3)"
+            bind:value={customModelName}
+          />
+          <input
+            class="key-input"
+            data-custom-key-input
+            type="password"
+            placeholder="API key"
+            bind:value={customKey}
+          />
+          <select
+            class="settings__function-provider"
+            data-custom-format-select
+            bind:value={customFormat}
+          >
+            <option value="GENERIC">Compatível com OpenAI</option>
+            <option value="ANTHROPIC">Compatível com Anthropic</option>
+          </select>
+          <div class="key-row">
+            <button
+              type="button"
+              class="btn btn--primary"
+              data-custom-model-add
+              disabled={!canAddCustomModel}
+              onclick={addCustomModel}
+            >
+              Adicionar modelo
+            </button>
+          </div>
+        </div>
+      </div>
+
       {#each FUNCTIONS as fn (fn)}
         {@const config = settingsState.functionConfig[fn]}
         <div class="settings__function" data-function-selector={fn}>
           <h3 class="settings__function-title">{FUNCTION_TITLES[fn]}</h3>
-          {#if !config}
+          {#if !config && modelSelections[fn] === ''}
             <p class="settings__function-empty" data-function-empty>
               Nenhum provedor configurado
             </p>
@@ -765,6 +1000,9 @@
             {/if}
             {#each configuredSlots as card (card.slot)}
               <option value={card.kind}>{card.title}</option>
+            {/each}
+            {#each customModels as entry (entry.id)}
+              <option value={'custom:' + entry.id}>{entry.label}</option>
             {/each}
           </select>
           <input
@@ -1228,6 +1466,23 @@
     background: rgba(255, 255, 255, 0.04);
     border: 0.1rem solid var(--rim);
     border-radius: 0.7rem;
+  }
+
+  /* ── Modelos personalizados (URL + modelo + key) ─────────────────────── */
+  .settings__custom {
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+    padding: 1.2rem;
+    background: var(--elevated);
+    border: 0.1rem solid var(--rim);
+    border-radius: 1rem;
+  }
+
+  .settings__custom-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
   }
 
   .settings__shortcut {

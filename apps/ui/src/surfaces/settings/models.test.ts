@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, cleanup, fireEvent } from '@testing-library/svelte'
+import { tick } from 'svelte'
 import Settings from './Settings.svelte'
 import { setSettingsStateFeed, resetSettingsStateFeed } from './settings-feed'
 import { onSettingsAction } from './settings-actions'
@@ -17,14 +18,18 @@ import { DEFAULT_FEATURE_TOGGLES, DEFAULT_SHORTCUTS } from '../../../../../contr
 // E persiste localmente em 'ray_models' (JSON por função; null quando a
 // função está sem provedor), emitindo 'ray:models-changed' para o app.
 
-const { emitMock } = vi.hoisted(() => ({
+const { emitMock, invokeMock } = vi.hoisted(() => ({
   emitMock: vi.fn<(event: string, payload?: unknown) => Promise<void>>().mockResolvedValue(undefined),
+  invokeMock: vi
+    .fn<(command: string, args?: unknown) => Promise<unknown>>()
+    .mockResolvedValue(undefined),
 }))
 
 vi.mock('@tauri-apps/api/event', () => ({
   emit: emitMock,
   listen: vi.fn().mockResolvedValue(() => {}),
 }))
+vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }))
 vi.mock('@tauri-apps/api/app', () => ({ getVersion: vi.fn().mockResolvedValue('1.2.3') }))
 
 // Node 25 expõe um localStorage global experimental SEM métodos, que sombreia
@@ -85,8 +90,10 @@ afterEach(() => {
   cleanup()
   resetSettingsStateFeed()
   emitMock.mockClear()
+  invokeMock.mockClear()
   window.localStorage.removeItem('ray_models')
   window.localStorage.removeItem('ray_audio_meters')
+  window.localStorage.removeItem('ray_custom_models')
 })
 
 describe('Modelos — seletor por função (RF-301/302/303/404)', () => {
@@ -357,5 +364,221 @@ describe('Modelos — persistência local e evento (ray:models-changed)', () => 
     ) as HTMLInputElement | null
     expect(select?.value, 'localStorage vence o functionConfig').toBe('GEMINI')
     expect(input?.value).toBe('gemini-2.0-flash')
+  })
+})
+
+describe('Modelos — modelos personalizados (URL + modelo + key)', () => {
+  const SECRET = 'sk-custom-secret-1'
+  let nextId = 0
+  /** Crypto determinístico: ids previsíveis para as asserções de slot. */
+  function installDeterministicId(): void {
+    Object.defineProperty(globalThis, 'crypto', {
+      value: {
+        randomUUID: () => `id${String(++nextId).padStart(2, '0')}aaaa-bbbb-cccc-dddd-eeee`,
+      },
+      configurable: true,
+    })
+  }
+
+  beforeEach(() => {
+    installDeterministicId()
+  })
+
+  function fillCustomForm(container: HTMLElement, overrides: Record<string, string> = {}): void {
+    const fields: Array<[string, string]> = [
+      ['[data-custom-label-input]', 'Meu servidor local'],
+      ['[data-custom-baseurl-input]', 'https://api.exemplo.com'],
+      ['[data-custom-model-name-input]', 'llama-3'],
+      ['[data-custom-key-input]', SECRET],
+    ]
+    for (const [selector, value] of fields) {
+      const input = container.querySelector(selector)
+      if (!input) {
+        throw new Error(`campo ${selector} não encontrado`)
+      }
+      fireEvent.input(input, { target: { value: overrides[selector] ?? value } })
+    }
+  }
+
+  async function addCustomModel(container: HTMLElement): Promise<string> {
+    fillCustomForm(container)
+    const add = container.querySelector('[data-custom-model-add]')
+    if (!add) {
+      throw new Error('botão de adicionar modelo não encontrado')
+    }
+    await fireEvent.click(add)
+    await tick()
+    const stored = JSON.parse(window.localStorage.getItem('ray_custom_models') ?? '[]') as Array<{
+      id: string
+    }>
+    expect(stored).toHaveLength(1)
+    return stored[0].id
+  }
+
+  it('renderiza o formulário: nome, URL, modelo, chave e formato', async () => {
+    setSettingsStateFeed(() => baseState())
+    const { container } = render(Settings)
+    await openTab(container, 'models')
+
+    expect(container.querySelector('[data-custom-models]')).not.toBeNull()
+    for (const selector of [
+      '[data-custom-label-input]',
+      '[data-custom-baseurl-input]',
+      '[data-custom-model-name-input]',
+      '[data-custom-key-input]',
+      '[data-custom-format-select]',
+      '[data-custom-model-add]',
+    ]) {
+      expect(container.querySelector(selector), `campo ${selector}`).not.toBeNull()
+    }
+  })
+
+  it('adicionar despacha credentialSave no slot próprio e persiste metadados SEM a chave', async () => {
+    setSettingsStateFeed(() => baseState())
+    const actions: SettingsAction[] = []
+    const unsubscribe = onSettingsAction((action: SettingsAction) => actions.push(action))
+    const { container } = render(Settings)
+    await openTab(container, 'models')
+
+    const id = await addCustomModel(container)
+
+    // A key cruza a fronteira declarada exatamente uma vez (App.svelte é a
+    // ponte que invoca save_credential no core — vault nativo, ADR-003).
+    expect(actions).toEqual([
+      {
+        type: 'credentialSave',
+        slot: `custom-${id}`,
+        kind: 'GENERIC',
+        connectionMode: 'COMPATIBLE_ENDPOINT',
+        secret: SECRET,
+        baseUrl: 'https://api.exemplo.com',
+      },
+    ])
+
+    const stored = JSON.parse(
+      window.localStorage.getItem('ray_custom_models') ?? '[]',
+    ) as Array<Record<string, string>>
+    expect(stored[0]).toEqual({
+      id,
+      slot: `custom-${id}`,
+      label: 'Meu servidor local',
+      baseUrl: 'https://api.exemplo.com',
+      model: 'llama-3',
+      kind: 'GENERIC',
+    })
+    expect(JSON.stringify(stored), 'a chave nunca é persistida (ADR-003)').not.toContain(SECRET)
+
+    // O modelo aparece nos seletores por função.
+    const select = container.querySelector(
+      '[data-function-selector="ANALYSIS"] [data-function-provider-select]',
+    )
+    expect(select?.querySelector(`option[value="custom:${id}"]`)).not.toBeNull()
+    expect(select?.textContent).toContain('Meu servidor local')
+    unsubscribe()
+  })
+
+  it('formato Anthropic salva com connectionMode API_KEY', async () => {
+    setSettingsStateFeed(() => baseState())
+    const actions: SettingsAction[] = []
+    const unsubscribe = onSettingsAction((action: SettingsAction) => actions.push(action))
+    const { container } = render(Settings)
+    await openTab(container, 'models')
+
+    fillCustomForm(container)
+    const format = container.querySelector(
+      '[data-custom-format-select]',
+    ) as HTMLSelectElement
+    await fireEvent.change(format, { target: { value: 'ANTHROPIC' } })
+    await tick()
+    await fireEvent.click(container.querySelector('[data-custom-model-add]')!)
+    await tick()
+
+    expect(actions).toHaveLength(1)
+    expect(actions[0]).toMatchObject({ type: 'credentialSave', kind: 'ANTHROPIC', connectionMode: 'API_KEY' })
+    unsubscribe()
+  })
+
+  it('atribuir um modelo personalizado a uma função persiste kind/model/customId', async () => {
+    setSettingsStateFeed(() => baseState())
+    const { container } = render(Settings)
+    await openTab(container, 'models')
+
+    const id = await addCustomModel(container)
+
+    const select = container.querySelector(
+      '[data-function-selector="ANALYSIS"] [data-function-provider-select]',
+    ) as HTMLSelectElement
+    await fireEvent.change(select, { target: { value: `custom:${id}` } })
+
+    const expected = {
+      TRANSCRIPTION: null,
+      ANALYSIS: { kind: 'GENERIC', model: 'llama-3', customId: id },
+      TRANSLATION: null,
+    }
+    expect(JSON.parse(window.localStorage.getItem('ray_models') ?? 'null')).toEqual(expected)
+    expect(emitMock).toHaveBeenCalledWith('ray:models-changed', expected)
+  })
+
+  it('excluir remove os metadados, invoca delete_credential e limpa a atribuição da função', async () => {
+    setSettingsStateFeed(() => baseState())
+    const { container } = render(Settings)
+    await openTab(container, 'models')
+
+    const id = await addCustomModel(container)
+    const select = container.querySelector(
+      '[data-function-selector="ANALYSIS"] [data-function-provider-select]',
+    ) as HTMLSelectElement
+    await fireEvent.change(select, { target: { value: `custom:${id}` } })
+
+    const del = container.querySelector(`[data-custom-model-delete="${id}"]`)
+    if (!del) {
+      throw new Error('botão de excluir não encontrado')
+    }
+    await fireEvent.click(del)
+
+    const deleteCall = invokeMock.mock.calls.find(([command]) => command === 'delete_credential')
+    expect(deleteCall?.[1]).toEqual({ slot: `custom-${id}` })
+    expect(window.localStorage.getItem('ray_custom_models')).toBe('[]')
+    expect(JSON.parse(window.localStorage.getItem('ray_models') ?? 'null')).toEqual({
+      TRANSCRIPTION: null,
+      ANALYSIS: null,
+      TRANSLATION: null,
+    })
+  })
+
+  it('preferência persistida com customId semeia o seletor na recarga', async () => {
+    window.localStorage.setItem(
+      'ray_custom_models',
+      JSON.stringify([
+        {
+          id: 'abc12345',
+          slot: 'custom-abc12345',
+          label: 'Meu servidor local',
+          baseUrl: 'https://api.exemplo.com',
+          model: 'llama-3',
+          kind: 'GENERIC',
+        },
+      ]),
+    )
+    window.localStorage.setItem(
+      'ray_models',
+      JSON.stringify({
+        TRANSCRIPTION: null,
+        ANALYSIS: { kind: 'GENERIC', model: 'llama-3', customId: 'abc12345' },
+        TRANSLATION: null,
+      }),
+    )
+    setSettingsStateFeed(() => baseState())
+    const { container } = render(Settings)
+    await openTab(container, 'models')
+
+    const select = container.querySelector(
+      '[data-function-selector="ANALYSIS"] [data-function-provider-select]',
+    ) as HTMLSelectElement
+    expect(select?.value).toBe('custom:abc12345')
+    const input = container.querySelector(
+      '[data-function-selector="ANALYSIS"] [data-function-model-input]',
+    ) as HTMLInputElement
+    expect(input?.value).toBe('llama-3')
   })
 })

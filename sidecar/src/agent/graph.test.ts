@@ -36,6 +36,8 @@ class FakeProvider implements AiProvider {
 
   /** Captures the system prompt from the last analyzeStream call. */
   lastSystemPrompt: string | undefined;
+  /** Captures the user prompt from the last analyzeStream call. */
+  lastUserPrompt: string | undefined;
 
   async validate(_credential: InjectedCredential) {
     return { valid: true };
@@ -43,6 +45,7 @@ class FakeProvider implements AiProvider {
 
   async *analyzeStream(params: AnalyzeParams): AsyncIterable<CompletionChunk> {
     this.lastSystemPrompt = params.system;
+    this.lastUserPrompt = params.userPrompt;
     yield { text: "Hello " };
     yield { text: "world" };
   }
@@ -158,6 +161,7 @@ async function collectEvents(
 beforeEach(() => {
   assistants.clear();
   fakeProvider.lastSystemPrompt = undefined;
+  fakeProvider.lastUserPrompt = undefined;
 });
 
 describe("suggestStream (T-102)", () => {
@@ -278,6 +282,63 @@ describe("suggestStream (T-102)", () => {
     const serialized = JSON.stringify(events);
     expect(serialized).not.toContain("sk-super-secret-do-not-leak-12345");
     expect(serialized).not.toContain("secret");
+  });
+});
+
+describe("SCREEN_CAPTURE prompt injection", () => {
+  it("injects the screenshot instruction when trigger is SCREEN_CAPTURE and there is no user prompt", async () => {
+    seedAssistant("a1", "General", "You are a general assistant.");
+
+    const req = makeRequest("a1");
+    req.trigger = "SCREEN_CAPTURE";
+    req.screenshots = ["data:image/png;base64,xyz"];
+
+    await collectEvents(suggestStream(req));
+
+    expect(fakeProvider.lastUserPrompt).toBeTruthy();
+    expect(fakeProvider.lastUserPrompt).toContain("screenshot");
+    expect(fakeProvider.lastUserPrompt).toContain("transcript context");
+  });
+
+  it("prepends the instruction to the user's own prompt instead of dropping it", async () => {
+    seedAssistant("a1", "General", "You are a general assistant.");
+
+    const req = makeRequest("a1");
+    req.trigger = "SCREEN_CAPTURE";
+    req.userPrompt = "Focus on the error message.";
+    req.screenshots = ["data:image/png;base64,xyz"];
+
+    await collectEvents(suggestStream(req));
+
+    expect(fakeProvider.lastUserPrompt).toContain("screenshot");
+    expect(fakeProvider.lastUserPrompt).toContain("Focus on the error message.");
+    // Instruction first, user prompt after
+    expect(fakeProvider.lastUserPrompt?.indexOf("screenshot")).toBeLessThan(
+      fakeProvider.lastUserPrompt!.indexOf("Focus on the error message."),
+    );
+  });
+
+  it("other triggers do not inject a prompt", async () => {
+    seedAssistant("a1", "General", "You are a general assistant.");
+
+    const req = makeRequest("a1");
+    req.trigger = "ANALYZE_CONVERSATION";
+
+    await collectEvents(suggestStream(req));
+
+    expect(fakeProvider.lastUserPrompt).toBeUndefined();
+  });
+
+  it("analyze (non-streaming) injects the instruction too", async () => {
+    seedAssistant("a1", "General", "You are a general assistant.");
+
+    const req = makeRequest("a1");
+    req.trigger = "SCREEN_CAPTURE";
+    req.screenshots = ["data:image/png;base64,xyz"];
+
+    await analyze(req);
+
+    expect(fakeProvider.lastUserPrompt).toContain("screenshot");
   });
 });
 

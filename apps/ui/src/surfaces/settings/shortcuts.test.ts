@@ -52,6 +52,8 @@ const SHORTCUT_LABELS: Record<string, string> = {
   notchNextInsight: 'Insight Próximo do Notch',
   previousResponse: 'Resposta Anterior',
   nextResponse: 'Resposta Próxima',
+  overlayScrollUp: 'Rolar Cima do Overlay',
+  overlayScrollDown: 'Rolar Baixo do Overlay',
   toggleActionBar: 'Alternar Barra de Ações',
   toggleAlwaysOnTop: 'Sempre no Topo',
   increaseOpacity: 'Aumentar Opacidade',
@@ -143,7 +145,7 @@ afterEach(() => {
 })
 
 describe('Atalhos — conjunto padrão (RF-604)', () => {
-  it('renderiza as 19 linhas de SHORTCUT_COMMANDS com os títulos do contrato', async () => {
+  it('renderiza as 22 linhas de SHORTCUT_COMMANDS com os títulos do contrato', async () => {
     const { container } = render(Settings)
     await openTab(container, 'shortcuts')
 
@@ -178,6 +180,8 @@ describe('Atalhos — conjunto padrão (RF-604)', () => {
     expect(comboText(container, 'captureScreen')).toBe('Cmd+E')
     expect(comboText(container, 'toggleMicCapture')).toBe('Cmd+Shift+D')
     expect(comboText(container, 'increaseOpacity')).toBe('Cmd+Shift+=')
+    expect(comboText(container, 'overlayScrollUp')).toBe('Cmd+Alt+Shift+ArrowUp')
+    expect(comboText(container, 'overlayScrollDown')).toBe('Cmd+Alt+Shift+ArrowDown')
   })
 
   it('o estado real de atalhos entra pelo feed (combos customizados exibidos)', async () => {

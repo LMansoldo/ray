@@ -239,6 +239,34 @@ describe('InsightCard — rolagem automática (RF-701)', () => {
     await rerender({ state: makeState({ text: 'ABC' }) })
     expect(body.scrollTop, 'retomada: segue o fim de novo').toBe(1100)
   })
+
+  it('atalho overlayScroll* (ray:overlay-scroll) rola o corpo e reavalia a rolagem automática', async () => {
+    const { container, rerender } = render(InsightCard, {
+      props: baseProps(makeState({ text: 'A' })),
+    })
+    const { body, setScrollHeight } = withScrollMetrics(container)
+    // clientHeight = 200 → passo = max(80, floor(200 * 0.6)) = 120.
+
+    window.dispatchEvent(new CustomEvent('ray:overlay-scroll', { detail: { dir: 'down' } }))
+    expect(body.scrollTop, 'scroll down avança um passo').toBe(120)
+
+    // Rolar para cima volta um passo e PAUSA a rolagem automática (não está
+    // no fim): conteúdo novo não deve mover a rolagem.
+    window.dispatchEvent(new CustomEvent('ray:overlay-scroll', { detail: { dir: 'up' } }))
+    expect(body.scrollTop).toBe(0)
+    setScrollHeight(1200)
+    await rerender({ state: makeState({ text: 'AB' }) })
+    expect(body.scrollTop, 'pausada após scroll up por atalho').toBe(0)
+
+    // Rolar até o fim por atalho RETOMA a rolagem automática: fim = 120
+    // (scrollHeight 320) → um passo chega ao fim.
+    setScrollHeight(320)
+    window.dispatchEvent(new CustomEvent('ray:overlay-scroll', { detail: { dir: 'down' } }))
+    expect(body.scrollTop).toBe(120)
+    setScrollHeight(1300)
+    await rerender({ state: makeState({ text: 'ABC' }) })
+    expect(body.scrollTop, 'retomada: atalho chegou ao fim').toBe(1100)
+  })
 })
 
 

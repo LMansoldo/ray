@@ -32,11 +32,15 @@ const SIDECAR_ACCESS_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
 ]
 
 // ADR-003 / general.md (Secrets): a UI persiste localmente APENAS as
-// preferências não-secretas desta allowlist (medidores, modelos por
-// função). Qualquer outro uso de storage é violação — segredo digitado
-// jamais toca storage (o gravável de verdade vive no núcleo: vault +
-// sidecar/Prisma).
-const ALLOWED_STORAGE_KEYS: readonly string[] = ['ray_audio_meters', 'ray_models']
+// preferências não-secretas desta allowlist (medidores, modelos por função,
+// metadados de modelos personalizados — NUNCA a chave). Qualquer outro uso
+// de storage é violação — segredo digitado jamais toca storage (o gravável
+// de verdade vive no núcleo: vault + sidecar/Prisma).
+const ALLOWED_STORAGE_KEYS: readonly string[] = [
+  'ray_audio_meters',
+  'ray_models',
+  'ray_custom_models',
+]
 
 // Storage/cookie fora da allowlist: proibidos na implementação.
 const PERSISTENCE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [

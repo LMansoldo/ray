@@ -17,10 +17,28 @@ componente é o root dessa janela e cuida SÓ da gestão de janela:
   leitura. Falha nunca é silenciosa: o core emite start+error em falhas
   pré-stream (vault/HTTP) e a janela abre também no error puro.
 - Movimento (RF-507): atalhos `moveModal*` movem a **janela** via
-  `move_window` — não existe mais transform in-page.
-- Redimensionamento: um `ResizeObserver` chama `resize_window` com a altura
-  do conteúdo (o body da superfície `overlay` é transparente via
-  `body[data-surface='overlay']` em app.css).
+  `move_window` — não existe mais transform in-page. Por mouse: alça no topo
+  do conteúdo (`[data-overlay-drag-handle]`) — duplo caminho, nativo
+  (`-webkit-app-region: drag` + `enable_movable_by_background` no setup do
+  core, que funciona com `focus: false` porque não depende de mousedown no
+  webview) e `startDragging()` da Window API como fallback multiplataforma.
+- Atalhos de conteúdo (todos via `ray:shortcut`): `previousResponse`/
+  `nextResponse` E `notchPreviousInsight`/`notchNextInsight` navegam o
+  histórico do overlay (evento DOM `ray:insight-nav`, consumido pelo
+  `<Overlay>`); `overlayScrollUp`/`overlayScrollDown` rolam o corpo do DIGA
+  ISSO (evento DOM `ray:overlay-scroll`, consumido pelo `InsightCard` —
+  reavalia `followEnd` da rolagem automática); `increaseOpacity`/
+  `decreaseOpacity` aplicam `set_window_opacity` ao PRÓPRIO label `overlay`
+  (a main aplica ao dela em App.svelte — alvos distintos, sem duplicação).
+- Redimensionamento: o tamanho é TODO do container Tauri — bordas nativas
+  (`resizable: true` no conf) e grip no canto inferior direito
+  (`[data-overlay-resize-handle]`, `startResizeDragging('SouthEast')`).
+  NÃO existe auto-fit (`resize_window` nunca é invocado daqui): o componente
+  sempre ocupa a largura/altura máximas da janela (`100vw/100vh`), o card
+  preenche em cascata e o DIGA ISSO rola dentro do corpo (o body da
+  superfície `overlay` é transparente via `body[data-surface='overlay']` em
+  app.css). O texto (inclusive blocos de código) quebra na largura
+  disponível (`MarkdownView` aplica `pre-wrap`/`overflow-wrap: anywhere`).
 - O conteúdo continua sendo `<Overlay>` (abaixo) — nada de stream aqui além
   do rastreio de status para visibilidade.
 

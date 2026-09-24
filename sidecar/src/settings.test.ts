@@ -25,13 +25,17 @@ describe("parseFeatureToggles", () => {
     expect(result.ok).toBe(false);
   });
 
-  it("rejects a missing toggle", () => {
-    const { autoScroll: _autoScroll, ...withoutAutoScroll } = DEFAULT_FEATURE_TOGGLES;
-    const result = parseFeatureToggles(withoutAutoScroll);
+  it("fills a missing toggle with the contract default (legacy blobs stay valid)", () => {
+    // Blobs persistidos antes de um toggle novo (ex.: pushToListen) não
+    // podem descartar as preferências do usuário na leitura — a chave
+    // ausente herda o default; as demais preservam o valor salvo.
+    const { pushToListen: _pushToListen, ...legacyBlob } = DEFAULT_FEATURE_TOGGLES;
+    const result = parseFeatureToggles({ ...legacyBlob, autoScroll: false });
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.errors.some((error) => error.path === "autoScroll")).toBe(true);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.pushToListen).toBe(DEFAULT_FEATURE_TOGGLES.pushToListen);
+      expect(result.value.autoScroll).toBe(false);
     }
   });
 

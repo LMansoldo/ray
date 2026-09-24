@@ -3,11 +3,13 @@ import { render, cleanup, fireEvent } from '@testing-library/svelte'
 import AppBar from './AppBar.svelte'
 import type { AppBarProps } from './types'
 
-// Contrato T-401 / RF-010: barra flutuante compacta com grip para arrastar,
-// botao Home, indicador de status, botao stealth e botoes de navegacao.
+// Contrato T-401 / RF-010: barra flutuante compacta (150x80) com grip para
+// arrastar, grid 3x2 de botoes so-icone e a BOLA do stealth como indicador
+// de estado (laranja = ativo; apagada = inativo). Sem texto na barra.
 // RF-502: ativacao rapida do stealth com sinalizacao clara do estado.
 // RF-504: ocultar a janela main ("panic hide") via hide_window.
-// RF-508: aviso de uso responsavel e conformidade legal ao ativar o stealth.
+// RF-508: o aviso de uso responsavel viaja NO TOOLTIP da bola do stealth
+// (a barra compacta nao tem texto visivel).
 //
 // Navegacao cross-window: invoke('show_window', { windowLabel: 'main' }) +
 // emit('ray:navigate', { surface: dest }). Nao ha mais pub/sub in-process.
@@ -48,27 +50,41 @@ afterEach(() => {
   cleanup()
 })
 
-function statusIndicator(container: HTMLElement): Element {
-  const el = container.querySelector('[data-appbar-status]')
-  expect(el, 'o indicador de status deve existir').not.toBeNull()
+function stealthBall(container: HTMLElement): Element {
+  const el = container.querySelector('[data-appbar-stealth]')
+  expect(el, 'a bola do stealth deve existir').not.toBeNull()
   return el as Element
 }
 
-function stealthNotice(container: HTMLElement): Element | null {
-  return container.querySelector('[data-stealth-notice]')
+function stealthState(container: HTMLElement): string {
+  const state = stealthBall(container).getAttribute('data-stealth-active')
+  expect(state, 'estado do stealth deve estar refletido na bola').not.toBeNull()
+  return state as string
+}
+
+function stealthTooltip(container: HTMLElement): string {
+  return stealthBall(container).getAttribute('title') ?? ''
 }
 
 describe('AppBar — elementos da barra flutuante (RF-010)', () => {
-  it('renderiza grip, Home, indicador de status, stealth, Iniciar Configuracao e Ocultar', () => {
+  it('renderiza grip, Home, bola do stealth, Iniciar Configuracao e Ocultar', () => {
     const { container, getByRole } = render(AppBar, { props: baseProps })
 
     expect(container.querySelector('[data-appbar]'), 'raiz da barra').not.toBeNull()
     expect(container.querySelector('[data-appbar-grip]'), 'grip de arrastar').not.toBeNull()
     expect(getByRole('button', { name: 'Home' }), 'botao Home').toBeDefined()
-    expect(container.querySelector('[data-appbar-status]'), 'indicador de status').not.toBeNull()
-    expect(getByRole('button', { name: /stealth/i }), 'botao stealth').toBeDefined()
+    expect(getByRole('button', { name: 'Assistentes' }), 'botao Assistentes').toBeDefined()
+    expect(getByRole('button', { name: 'Configuracoes' }), 'botao Configuracoes').toBeDefined()
+    expect(container.querySelector('[data-appbar-stealth]'), 'bola do stealth').not.toBeNull()
     expect(getByRole('button', { name: 'Iniciar Configuracao' })).toBeDefined()
     expect(getByRole('button', { name: 'Ocultar' }), 'botao de ocultar').toBeDefined()
+  })
+
+  it('a barra nao tem texto de status — so a bola indica o estado (barra 150x80)', () => {
+    const { container } = render(AppBar, { props: baseProps })
+    expect(container.querySelector('[data-appbar-status]')).toBeNull()
+    expect(container.textContent ?? '').not.toContain('Stealth ativo')
+    expect(container.textContent ?? '').not.toContain('Stealth inativo')
   })
 
   it('o grip existe como indicador visual de arraste', () => {
@@ -82,41 +98,43 @@ describe('AppBar — elementos da barra flutuante (RF-010)', () => {
     expect(nav?.hasAttribute('data-tauri-drag-region')).toBe(true)
   })
 
-  it('comeca com stealth ativo e o aviso RF-508 visivel', () => {
+  it('comeca com stealth ativo (bola acesa) e o aviso RF-508 no tooltip', () => {
     const { container } = render(AppBar, { props: baseProps })
-    expect(statusIndicator(container).textContent).toContain('Stealth ativo')
-    expect(stealthNotice(container)).not.toBeNull()
+    expect(stealthState(container)).toBe('true')
+    const tooltip = stealthTooltip(container)
+    for (const fragment of NOTICE_FRAGMENTS) {
+      expect(tooltip).toMatch(fragment)
+    }
     expect(invokeMock).not.toHaveBeenCalled()
   })
 })
 
 describe('AppBar — stealth alterna visivelmente (RF-502)', () => {
-  it('clique desativa: set_stealth com excluded=false e aviso some', async () => {
+  it('clique desativa: set_stealth com excluded=false e a bola apaga', async () => {
     const { container, getByRole } = render(AppBar, { props: baseProps })
     await fireEvent.click(getByRole('button', { name: /stealth/i }))
 
     expect(invokeMock).toHaveBeenCalledTimes(1)
     expect(invokeMock.mock.calls[0]).toEqual(['set_stealth', { windowLabel: 'main', excluded: false }])
-    expect(statusIndicator(container).textContent).toContain('Stealth inativo')
-    expect(stealthNotice(container)).toBeNull()
+    expect(stealthState(container)).toBe('false')
+    expect(stealthTooltip(container)).toMatch(/inativo/)
   })
 
-  it('reativar exibe aviso RF-508 (SRS §7)', async () => {
+  it('reativar restaura o aviso RF-508 no tooltip (SRS §7)', async () => {
     const { container, getByRole } = render(AppBar, { props: baseProps })
     const botao = getByRole('button', { name: /stealth/i })
     await fireEvent.click(botao)
     await fireEvent.click(botao)
 
-    const aviso = stealthNotice(container)
-    expect(aviso).not.toBeNull()
+    const tooltip = stealthTooltip(container)
     for (const fragment of NOTICE_FRAGMENTS) {
-      expect(aviso?.textContent).toMatch(fragment)
+      expect(tooltip).toMatch(fragment)
     }
     expect(invokeMock.mock.calls[0]).toEqual(['set_stealth', { windowLabel: 'main', excluded: false }])
     expect(invokeMock.mock.calls[1]).toEqual(['set_stealth', { windowLabel: 'main', excluded: true }])
   })
 
-  it('segundo clique reativa: set_stealth com excluded=true e indicador muda', async () => {
+  it('segundo clique reativa: set_stealth com excluded=true e a bola acende', async () => {
     const { container, getByRole } = render(AppBar, { props: baseProps })
     const botao = getByRole('button', { name: /stealth/i })
     await fireEvent.click(botao)
@@ -125,8 +143,7 @@ describe('AppBar — stealth alterna visivelmente (RF-502)', () => {
     expect(invokeMock).toHaveBeenCalledTimes(2)
     expect(invokeMock.mock.calls[0]).toEqual(['set_stealth', { windowLabel: 'main', excluded: false }])
     expect(invokeMock.mock.calls[1]).toEqual(['set_stealth', { windowLabel: 'main', excluded: true }])
-    expect(statusIndicator(container).textContent).toContain('Stealth ativo')
-    expect(stealthNotice(container)).not.toBeNull()
+    expect(stealthState(container)).toBe('true')
   })
 
   it('monta inativo quando stealthExcluded=false, sem re-disparar o comando', async () => {
@@ -134,8 +151,7 @@ describe('AppBar — stealth alterna visivelmente (RF-502)', () => {
       props: { ...baseProps, stealthExcluded: false },
     })
 
-    expect(statusIndicator(container).textContent).toContain('Stealth inativo')
-    expect(stealthNotice(container)).toBeNull()
+    expect(stealthState(container)).toBe('false')
     expect(invokeMock).not.toHaveBeenCalled()
 
     await fireEvent.click(getByRole('button', { name: /stealth/i }))
@@ -202,11 +218,8 @@ describe('AppBar — navegacao cross-window (RF-010)', () => {
 })
 
 describe('AppBar — regras gerais do repo', () => {
-  it('a saida renderizada nao contem emojis, nem com aviso visivel', async () => {
-    const { container, getByRole } = render(AppBar, { props: baseProps })
-    expect(EMOJI_PATTERN.test(container.textContent ?? '')).toBe(false)
-
-    await fireEvent.click(getByRole('button', { name: /stealth/i }))
+  it('a saida renderizada nao contem emojis', () => {
+    const { container } = render(AppBar, { props: baseProps })
     expect(EMOJI_PATTERN.test(container.textContent ?? '')).toBe(false)
   })
 })

@@ -21,7 +21,8 @@ import type { ProviderSlotId } from './types'
 export type SettingsAction =
   | {
       type: 'credentialSave'
-      slot: ProviderSlotId
+      /** Slot embutido ou slot de modelo personalizado ('custom-<id>'). */
+      slot: ProviderSlotId | `custom-${string}`
       kind: ProviderKind
       connectionMode: ProviderConnectionMode
       baseUrl?: string

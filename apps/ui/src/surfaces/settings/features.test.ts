@@ -40,6 +40,7 @@ const FEATURE_LABELS: Record<string, string> = {
   notchExperience: 'Experiência do Notch',
   autoCompaction: 'Compactação automática',
   quickScreenshotAnalysis: 'Análise Rápida de Screenshots',
+  pushToListen: 'Ouvir Segurando (o agente só escuta segurando o atalho)',
 }
 
 function baseState(overrides: Partial<SettingsState> = {}): SettingsState {
@@ -112,6 +113,18 @@ describe('Recursos — toggles dirigidos pelo contrato (RF-700 / contracts/setti
         DEFAULT_FEATURE_TOGGLES[name],
       )
     }
+  })
+
+  it('pushToListen nasce DESLIGADO (opt-in: o agente só escuta segurando o atalho)', async () => {
+    const { container } = render(Settings)
+    await openTab(container, 'features')
+
+    const checkbox = container.querySelector(
+      '[data-feature-toggle="pushToListen"] input[type="checkbox"]',
+    ) as HTMLInputElement
+    expect(checkbox).not.toBeNull()
+    expect(checkbox.checked).toBe(false)
+    expect(DEFAULT_FEATURE_TOGGLES.pushToListen).toBe(false)
   })
 
   it('alternar um toggle despacha featureToggleChange com o novo valor', async () => {

@@ -16,6 +16,9 @@ export const FEATURE_TOGGLE_NAMES = [
   "notchExperience",
   "autoCompaction",
   "quickScreenshotAnalysis",
+  // Espelho de contracts/settings.ts: Ouvir Segurando — o agente só recebe
+  // contexto enquanto o atalho pushToListen está pressionado (opt-in).
+  "pushToListen",
 ] as const;
 
 export type FeatureToggleName = (typeof FEATURE_TOGGLE_NAMES)[number];
@@ -29,6 +32,7 @@ export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
   notchExperience: true,
   autoCompaction: true,
   quickScreenshotAnalysis: true,
+  pushToListen: false,
 };
 
 // ---------------------------------------------------------------------
@@ -46,12 +50,15 @@ export const SHORTCUT_COMMANDS = [
   "captureScreen",
   "toggleVoiceRecording",
   "toggleMicCapture",
+  "pushToListen",
   "scrollUp",
   "scrollDown",
   "notchPreviousInsight",
   "notchNextInsight",
   "previousResponse",
   "nextResponse",
+  "overlayScrollUp",
+  "overlayScrollDown",
   "toggleActionBar",
   "toggleAlwaysOnTop",
   "increaseOpacity",
@@ -78,12 +85,15 @@ export const DEFAULT_SHORTCUTS: ShortcutMap = {
   captureScreen: { enabled: true, modifiers: ["Cmd"], key: "E" },
   toggleVoiceRecording: { enabled: true, modifiers: ["Cmd"], key: "D" },
   toggleMicCapture: { enabled: true, modifiers: ["Cmd", "Shift"], key: "D" },
+  pushToListen: { enabled: true, modifiers: ["Alt"], key: "Space" },
   scrollUp: { enabled: true, modifiers: ["Cmd"], key: "ArrowUp" },
   scrollDown: { enabled: true, modifiers: ["Cmd"], key: "ArrowDown" },
   notchPreviousInsight: { enabled: true, modifiers: ["Cmd"], key: "ArrowLeft" },
   notchNextInsight: { enabled: true, modifiers: ["Cmd"], key: "ArrowRight" },
   previousResponse: { enabled: true, modifiers: ["Cmd", "Alt"], key: "ArrowUp" },
   nextResponse: { enabled: true, modifiers: ["Cmd", "Alt"], key: "ArrowDown" },
+  overlayScrollUp: { enabled: true, modifiers: ["Cmd", "Alt", "Shift"], key: "ArrowUp" },
+  overlayScrollDown: { enabled: true, modifiers: ["Cmd", "Alt", "Shift"], key: "ArrowDown" },
   toggleActionBar: { enabled: true, modifiers: ["Cmd"], key: "M" },
   toggleAlwaysOnTop: { enabled: true, modifiers: ["Cmd", "Shift"], key: "A" },
   increaseOpacity: { enabled: true, modifiers: ["Cmd", "Shift"], key: "=" },
@@ -128,7 +138,13 @@ function findUnknownKeys(value: Record<string, unknown>, known: (key: string) =>
   return Object.keys(value).filter((key) => !known(key));
 }
 
-/** Valida `Settings.features` (RF-700): objeto com exatamente os toggles conhecidos, todos booleanos. */
+/**
+ * Valida `Settings.features` (RF-700): objeto com os toggles conhecidos,
+ * todos booleanos. Chave AUSENTE herda o default — blobs persistidos antes
+ * de um toggle novo (ex.: pushToListen) continuam válidos na leitura, sem
+ * descartar as preferências do usuário; valor PRESENTE não-booleano e
+ * chave DESCONHECIDA seguem sendo erro.
+ */
 export function parseFeatureToggles(value: unknown): SettingsParseResult<FeatureToggles> {
   if (!isRecord(value)) {
     return { ok: false, errors: [{ path: "$", message: "features deve ser um objeto" }] };
@@ -139,6 +155,10 @@ export function parseFeatureToggles(value: unknown): SettingsParseResult<Feature
 
   for (const name of FEATURE_TOGGLE_NAMES) {
     const raw = value[name];
+    if (raw === undefined) {
+      result[name] = DEFAULT_FEATURE_TOGGLES[name];
+      continue;
+    }
     if (typeof raw !== "boolean") {
       errors.push({ path: name, message: `"${name}" deve ser boolean` });
       continue;

@@ -83,7 +83,12 @@
   async function refreshCredential(): Promise<void> {
     try {
       const res = await invoke<{ credentials: CredentialSummary[] }>('get_provider_statuses')
-      const cred = res.credentials[0]
+      const list = res.credentials
+      // A função Análise dirige o agente: quando um modelo personalizado
+      // está atribuído a ela, a credencial desse slot tem precedência.
+      const slot = analysisCredentialSlot()
+      const cred =
+        (slot ? list.find((candidate) => candidate.slot === slot) : undefined) ?? list[0]
       if (cred) {
         credential = {
           kind: cred.kind,
@@ -98,7 +103,7 @@
   }
 
   // ── Config de modelos por função (aba Modelos, localStorage) ───────────
-  type ModelConfig = { kind?: string; model?: string }
+  type ModelConfig = { kind?: string; model?: string; customId?: string }
   let modelsConfig = $state<Record<string, ModelConfig>>(readModels())
 
   function readModels(): Record<string, ModelConfig> {
@@ -109,6 +114,19 @@
       /* ignora */
     }
     return {}
+  }
+
+  /** Slot de credencial (modelo personalizado) atribuído à função Análise. */
+  function analysisCredentialSlot(): string {
+    const customId = modelsConfig.ANALYSIS?.customId
+    return customId ? `custom-${customId}` : ''
+  }
+
+  /** Sincroniza ao núcleo a credencial da função Análise (usada pelos
+   *  atalhos e pelo ciclo de análise automática — o core não lê o Web
+   *  Storage da UI). Falha fora do Tauri é silenciosa. */
+  function syncAnalysisCredentialSlot(): void {
+    void invoke('set_analysis_credential_slot', { slot: analysisCredentialSlot() }).catch(() => {})
   }
 
   // ── Features (RF-700) + medidores (RF-206) ─────────────────────────────
@@ -292,6 +310,11 @@
     void refreshCredential()
     void loadFeatures()
     void refreshSessions()
+    // Janela principal é a dona da preferência de modelos — as demais
+    // superfícies flutuantes não precisam sincronizar o slot de análise.
+    if (windowLabel === 'main') {
+      syncAnalysisCredentialSlot()
+    }
 
     const unlisteners: Array<() => void> = []
     const track = (promise: Promise<() => void>): void => {
@@ -368,6 +391,9 @@
     track(
       listen<Record<string, ModelConfig>>('ray:models-changed', (event) => {
         modelsConfig = event.payload ?? {}
+        syncAnalysisCredentialSlot()
+        // A credencial injetada segue a atribuição da função Análise.
+        void refreshCredential()
       }),
     )
     track(

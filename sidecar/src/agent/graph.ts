@@ -17,6 +17,25 @@ import type {
 
 // --- Streaming (SSE) -------------------------------------------------------
 
+// O campo trigger nunca chega ao provider — sem uma instrução, o screenshot
+// entra "mudo" no request e o modelo responde só descrevendo a tela,
+// ignorando o contexto de transcrição.
+const SCREEN_CAPTURE_PROMPT =
+  "The user just captured their screen — the screenshot is attached. " +
+  "Analyze what is visible on screen and, when transcript context is present, " +
+  "connect it to the conversation: relate what is on screen to what is being " +
+  "discussed and suggest useful insights or next steps. " +
+  "Do not merely describe the screen.";
+
+function resolveUserPrompt(req: SuggestRequest): string | undefined {
+  const triggerPrompt =
+    req.trigger === "SCREEN_CAPTURE" ? SCREEN_CAPTURE_PROMPT : undefined;
+  if (triggerPrompt && req.userPrompt) {
+    return triggerPrompt + "\n\n" + req.userPrompt;
+  }
+  return req.userPrompt ?? triggerPrompt;
+}
+
 /**
  * Stream suggestion events: start → token* → done (or error on failure).
  * Provider-agnostic — receives the resolved AiProvider and the assistant's
@@ -36,7 +55,7 @@ export async function* runSuggestStream(
       credential: req.credential,
       system: assistantSystemPrompt,
       context: req.context,
-      userPrompt: req.userPrompt,
+      userPrompt: resolveUserPrompt(req),
       screenshots: req.screenshots,
     });
 
@@ -79,7 +98,7 @@ export async function runAnalyze(
     credential: req.credential,
     system: assistantSystemPrompt,
     context: req.context,
-    userPrompt: req.userPrompt,
+    userPrompt: resolveUserPrompt(req),
     screenshots: req.screenshots,
   });
 

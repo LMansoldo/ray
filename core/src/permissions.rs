@@ -87,7 +87,46 @@ mod mac {
         Some(status)
     }
 
+    /// macOS 15+/26: prompts do TCC para apps em BACKGROUND são suprimidos —
+    /// o diálogo não aparece, o pedido não cria entrada em Privacidade e o
+    /// app nunca fica "habilitável". O Ray é app Accessory (LSUIElement),
+    /// então ativamos o app (trazê-lo à frente) antes de pedir. `open` no
+    /// bundle ativa a instância em execução sem relançar.
+    pub(crate) fn activate_for_prompt() {
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        // .../Ray.app/Contents/MacOS/ray-core → nth(3) = Ray.app (só se for
+        // mesmo um bundle .app; em binário desempacotado, não faz nada).
+        let Some(bundle) = exe.ancestors().nth(3) else {
+            return;
+        };
+        if bundle.extension().is_none_or(|e| e != "app") {
+            return;
+        }
+        let _ = std::process::Command::new("open").arg(bundle).spawn();
+        // Tempo para o AppKit ativar a janela antes do request anexar.
+        std::thread::sleep(std::time::Duration::from_millis(600));
+    }
+
     pub(crate) unsafe fn speech_request_authorization() -> Option<bool> {
+        // O Speech lê a usage description do BUNDLE principal — a seção
+        // __TEXT,__info_plist embutida pelo build.rs NÃO basta (macOS 26:
+        // TCC aborta o processo mesmo com ela, ver crash reports TCC/
+        // NSSpeechRecognitionUsageDescription). Em binário desempacotado
+        // (cargo tauri dev), recusar com log em vez de derrubar o app:
+        // para testar permissões em dev, use core/scripts/dev-app.sh.
+        let bundled = std::env::current_exe()
+            .map(|exe| exe.to_string_lossy().contains(".app/Contents/MacOS/"))
+            .unwrap_or(false);
+        if !bundled {
+            eprintln!(
+                "[ray] permissão de fala: binário desempacotado — o macOS aborta \
+                 o processo neste request (a usage description só é lida de um \
+                 bundle). Rode via core/scripts/dev-app.sh ou use o app empacotado."
+            );
+            return None;
+        }
         let cls = class_or_none("SFSpeechRecognizer")?;
         let (tx, rx) = mpsc::channel::<i64>();
         let block = RcBlock::new(move |status: i64| {
@@ -106,6 +145,37 @@ fn av_status_to_str(status: Option<i64>) -> String {
         Some(0) => NOT_GRANTED.into(),
         _ => NOT_GRANTED.into(),
     }
+}
+
+/// Fluxo completo de request de permissões: vira app REGULAR (com Dock)
+/// durante os pedidos — o macOS 15+/26 AUTO-NEGA o prompt de microfone de
+/// apps Accessory/background (mic vira "denied" sem diálogo e sem entrada
+/// em Privacidade) — ativa a janela, pede e volta a Accessory no fim.
+#[cfg(target_os = "macos")]
+fn request_with_prompts(app: &tauri::AppHandle, kinds: &[String]) {
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    mac::activate_for_prompt();
+    for kind in kinds {
+        match kind.as_str() {
+            "microphone" => {
+                let r = unsafe { mac::av_request_access("soun") };
+                eprintln!("[ray] permissão microfone: request → {r:?}");
+            }
+            "speechRecognition" => {
+                let r = unsafe { mac::speech_request_authorization() };
+                eprintln!("[ray] permissão fala: request → {r:?}");
+            }
+            "screenRecording" => {
+                let r = unsafe { CGRequestScreenCaptureAccess() };
+                eprintln!("[ray] permissão tela: request → {r}");
+            }
+            other => eprintln!("[ray] permissão desconhecida: {other}"),
+        }
+    }
+    // Deixa o usuário ver o resultado do último diálogo antes de sumir com
+    // o ícone do Dock.
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 }
 
 /// Lê o status atual de todas as permissões (sem dialog).
@@ -140,28 +210,39 @@ pub fn get_permission_status() -> PermissionMap {
 /// "accessibility". Acessibilidade e tela-negada não têm dialog de API —
 /// abrem os Ajustes do Sistema; o status final depende da ação do usuário.
 #[tauri::command]
-pub fn request_permission(kind: String) -> PermissionMap {
+pub fn request_permission(app: tauri::AppHandle, kind: String) -> PermissionMap {
     #[cfg(target_os = "macos")]
-    match kind.as_str() {
-        "microphone" => unsafe { mac::av_request_access("soun") },
-        "speechRecognition" => unsafe { mac::speech_request_authorization() },
-        "screenRecording" => unsafe { Some(CGRequestScreenCaptureAccess()) },
-        _ => None,
-    };
+    request_with_prompts(&app, std::slice::from_ref(&kind));
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, kind);
+    get_permission_status()
+}
+
+/// Pede várias permissões em sequência (uso interno e botão "Habilitar tudo").
+#[cfg(target_os = "macos")]
+pub fn request_permissions(
+    app: tauri::AppHandle,
+    kinds: Vec<&str>,
+) -> PermissionMap {
+    let kinds: Vec<String> = kinds.into_iter().map(String::from).collect();
+    request_with_prompts(&app, &kinds);
     get_permission_status()
 }
 
 /// Solicita todas as permissões em sequência (botão "Habilitar tudo").
 #[tauri::command]
-pub fn request_all_permissions() -> PermissionMap {
+pub fn request_all_permissions(app: tauri::AppHandle) -> PermissionMap {
     #[cfg(target_os = "macos")]
-    {
-        unsafe {
-            mac::av_request_access("soun");
-            mac::speech_request_authorization();
-            CGRequestScreenCaptureAccess();
-        }
-    }
+    request_with_prompts(
+        &app,
+        &[
+            "microphone".to_string(),
+            "speechRecognition".to_string(),
+            "screenRecording".to_string(),
+        ],
+    );
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
     get_permission_status()
 }
 
