@@ -56,6 +56,16 @@ export type AppendTranscriptRequest = { sessionId: string, speaker: Speaker, tex
 export type AssistantCategory = "GENERAL" | "MEETINGS" | "SALES" | "TRANSLATION" | "INTERVIEW" | "STUDY" | "CUSTOM";
 
 /**
+ * Resposta de GET /assistants.
+ */
+export type AssistantList = { assistants: Array<AssistantSummary>, };
+
+/**
+ * Resumo de um assistente para a UI (GET /assistants).
+ */
+export type AssistantSummary = { id: string, name: string, category: string, source: string, icon: string | null, };
+
+/**
  * POST /assistants — cria um assistente (RF-336/338).
  */
 export type CreateAssistantRequest = { userId: string, name: string, category: AssistantCategory, prompt: string, icon?: string, };
@@ -128,6 +138,23 @@ export type MeetingPlatform = "ZOOM" | "GOOGLE_MEET" | "MICROSOFT_TEAMS" | "HANG
 export type ProviderConnectionMode = "API_KEY" | "SUBSCRIPTION" | "AGGREGATOR" | "COMPATIBLE_ENDPOINT";
 
 export type ProviderKind = "OPENAI" | "ANTHROPIC" | "GEMINI" | "DEEPSEEK" | "OPENROUTER" | "GENERIC";
+
+/**
+ * POST /sessions/summary/roll (core → sidecar): dispara a atualização do
+ * resumo rolante da sessão — a camada de memória que dá ao copiloto o
+ * contexto completo da reunião, além da janela verbatim de segmentos.
+ * O sidecar decide o corte real (contagem de segmentos no banco); o core
+ * só sinaliza que há volume novo. Credencial injetada pelo core como no
+ * suggest (ADR-003): o segredo real entra APENAS no corpo, resolvido do
+ * cofre na hora da chamada.
+ */
+export type RollSummaryRequest = { sessionId: string, credential: InjectedCredential, };
+
+/**
+ * Resposta do rolamento. `updated: false` cobre os no-ops: volume abaixo
+ * do lote mínimo ou rolamento já em andamento para a sessão.
+ */
+export type RollSummaryResponse = { updated: boolean, summary?: string, summarizedSegmentCount?: bigint, };
 
 /**
  * Payload de POST /credentials (core → sidecar).
@@ -203,6 +230,7 @@ export type IpcEndpoints = {
   "POST /sessions/start": { req: StartSessionRequest; res: IpcResult<StartSessionResponse> };
   "POST /sessions/transcript": { req: AppendTranscriptRequest; res: IpcResult<{ segmentId: string }> };
   "POST /sessions/end": { req: EndSessionRequest; res: IpcResult<EndSessionResponse> };
+  "POST /sessions/summary/roll": { req: RollSummaryRequest; res: IpcResult<RollSummaryResponse> };
   "POST /translate": { req: TranslateRequest; res: IpcResult<TranslateResponse> };
   "POST /credentials": { req: SaveCredentialRequest; res: IpcResult<SaveCredentialResponse> };
   "DELETE /credentials": { req: DeleteCredentialRequest; res: IpcResult<{ deleted: boolean }> };

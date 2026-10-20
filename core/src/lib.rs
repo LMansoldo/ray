@@ -35,14 +35,20 @@ pub fn set_sidecar_port(port: u16) {
 // A UI Svelte invoca estes comandos via `invoke()`. O núcleo resolve
 // a credencial no cofre e delega ao ipc_client para a chamada ao sidecar.
 
-/// Alterna o modo stealth de uma janela (ADR-008).
+/// Alterna o modo stealth (ADR-008) — GLOBAL: aplica a exclusão de captura
+/// em todas as janelas participantes (`windows::STEALTH_WINDOWS`). O setup
+/// nasce com o modo ativo nessas mesmas janelas; alternar só a janela
+/// chamadora deixava as demais fora da correção (bug: "desativar" não
+/// devolvia as janelas à captura).
 // Not `pub`: a `pub fn` at crate root annotated `#[tauri::command]` collides
 // with the macro's own `#[macro_export]`'d `__cmd__*` helper (also crate-root),
 // causing E0255. The UI-facing contract is the string name registered in
 // `generate_handler!` below, not Rust visibility, so this is not a break.
 #[tauri::command]
-fn set_stealth(window_label: String, excluded: bool) {
-    windows::set_capture_excluded(&window_label, excluded);
+fn set_stealth(excluded: bool) {
+    for label in windows::STEALTH_WINDOWS {
+        windows::set_capture_excluded(label, excluded);
+    }
 }
 
 /// Alterna a visibilidade da janela inteira ("panic hide", RF-504).
@@ -204,6 +210,30 @@ fn get_session(session_id: String) -> Result<serde_json::Value, String> {
     unwrap_ipc(sidecar_request(port, "GET", &format!("/sessions/{session_id}"), None)?)
 }
 
+/// Relatório exportável da sessão (T-604) — delega ao sidecar. O formato é
+/// restrito a md|html aqui (default md); o documento vem no envelope IpcResult
+/// como JSON { sessionId, format, filename, content } e a UI entrega o arquivo.
+#[tauri::command]
+fn export_session_report(
+    session_id: String,
+    format: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    if port == 0 {
+        return Err("sidecar not started".into());
+    }
+    let fmt = match format.as_deref() {
+        Some("html") => "html",
+        _ => "md",
+    };
+    unwrap_ipc(sidecar_request(
+        port,
+        "GET",
+        &format!("/sessions/{session_id}/report?format={fmt}"),
+        None,
+    )?)
+}
+
 /// Settings persistidos (features + atalhos) — delega ao sidecar.
 #[tauri::command]
 fn get_app_settings() -> Result<serde_json::Value, String> {
@@ -226,6 +256,53 @@ fn save_feature_toggles(features: serde_json::Value) -> Result<serde_json::Value
     }
     let body = serde_json::json!({ "features": features });
     unwrap_ipc(sidecar_request(port, "PUT", "/settings", Some(body))?)
+}
+
+/// Persiste o locale de reconhecimento de fala (settings.sttLanguage) via
+/// sidecar. Antes de delegar, espelha o locale no motor de STT e descarta
+/// os engines vivos — a próxima janela de áudio já transcreve no idioma
+/// novo, sem esperar o fim da sessão.
+#[tauri::command]
+fn save_stt_language(language: String) -> Result<serde_json::Value, String> {
+    if !stt::set_stt_language(&language) {
+        return Err(format!(
+            "sttLanguage inválido: '{language}' — valores aceitos: {:?}",
+            stt::STT_LANGUAGE_IDS
+        ));
+    }
+    stt::reset_engine();
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    if port == 0 {
+        return Err("sidecar not started".into());
+    }
+    let body = serde_json::json!({ "sttLanguage": language });
+    unwrap_ipc(sidecar_request(port, "PUT", "/settings", Some(body))?)
+}
+
+/// Persiste o template de overlay customizado (HTML+CSS, sem JS) via sidecar.
+/// Em caso de ok, emite o evento global `ray:overlay-template-changed` — a
+/// janela do overlay atualiza o template ao vivo, sem reinício (o evento é
+/// broadcast: as Configurações salvam e a janela 'overlay' consome).
+#[tauri::command]
+fn save_overlay_template(
+    app: tauri::AppHandle,
+    enabled: bool,
+    template: String,
+) -> Result<serde_json::Value, String> {
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    if port == 0 {
+        return Err("sidecar not started".into());
+    }
+    let body = serde_json::json!({
+        "overlayTemplateEnabled": enabled,
+        "overlayTemplate": template,
+    });
+    let value = unwrap_ipc(sidecar_request(port, "PUT", "/settings", Some(body))?)?;
+    let _ = app.emit(
+        "ray:overlay-template-changed",
+        serde_json::json!({ "enabled": enabled, "template": template }),
+    );
+    Ok(value)
 }
 
 /// Resolver de credencial que consulta o cofre nativo (vault).
@@ -647,29 +724,31 @@ mod tests {
     }
 
     #[test]
-    fn held_context_survives_the_40_entry_trim() {
+    fn held_context_survives_the_80_entry_trim() {
         let _guard = PTT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_ptt_state();
 
-        // Enche o log (cap 40) e marca o segurar.
+        // Enche parte do log e marca o segurar.
         for i in 0..40 {
             push_context("others", format!("pre {i}"));
         }
         let mark = context_seq_now();
-        // Segurar longo: mais de 40 novos segmentos — o trim drena da frente,
-        // mas a janela por seq permanece exata.
-        for i in 0..60 {
+        // Segurar longo: o trim drena da frente (comendo os primeiros
+        // segmentos do próprio segurar), mas a janela por seq permanece
+        // exata. 40 pre + 100 durante = 140; cap 80 drena os 40 pre + os
+        // 20 primeiros "durante" — sobram os 80 mais recentes do segurar.
+        for i in 0..100 {
             push_context("self", format!("durante {i}"));
         }
 
         let held = held_context_segments(mark);
         assert_eq!(
             held.len(),
-            40,
-            "janela sobrevive ao trim: os 40 segmentos mais recentes do segurar"
+            80,
+            "janela sobrevive ao trim: os 80 segmentos mais recentes do segurar"
         );
         assert_eq!(held[0].text, "durante 20", "mais antigo sobrevivente");
-        assert_eq!(held[39].text, "durante 59");
+        assert_eq!(held[79].text, "durante 99");
         assert!(
             held.iter().all(|s| s.text.starts_with("durante")),
             "nenhum segmento pré-segurar vaza para o agente"
@@ -756,26 +835,37 @@ struct MeetingSession {
 
 static MEETING: std::sync::Mutex<Option<MeetingSession>> = std::sync::Mutex::new(None);
 
-/// Contexto de transcrição acumulado (últimos 40 segmentos). Compartilhado
+/// Contexto de transcrição acumulado (últimos 80 segmentos). Compartilhado
 /// entre o loop de STT e os fluxos acionados por atalho (Capturar Tela /
 /// Analisar Conversa) para que o copiloto receba "o que foi dito" mesmo
 /// quando o gatilho sai de um atalho global, não do ciclo automático.
 /// Cada entrada carrega um seq monotônico: a janela do modo Ouvir Segurando
-/// (held_context_segments) delimita por seq e sobrevive ao trim de 40.
+/// (held_context_segments) delimita por seq e sobrevive ao trim de 80.
+/// O histórico anterior à janela verbatim (RECENT_WINDOW) vive no resumo
+/// rolante da sessão, mantido pelo sidecar (POST /sessions/summary/roll).
 static CONTEXT_LOG: std::sync::Mutex<Vec<(u64, String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// Janela verbatim de segmentos enviada ao copiloto em cada análise.
+/// Cobrirá sempre mais que o lado sidecar deixa de fora do rolamento
+/// (ROLL_KEEP_RECENT = 16), garantindo sobreposição entre as duas camadas.
+const RECENT_WINDOW: usize = 20;
+
+/// Intervalo do ciclo de análise automática (T-300s): a cada período roda
+/// captura de tela + copiloto sobre o contexto recente.
+const ANALYSIS_INTERVAL_MS: u64 = 20_000;
 
 /// Próximo seq a ser atribuído a um segmento de contexto. Nunca é zerado —
 /// marcas antigas (PTT_MARK) continuam válidas após clear/trim do log.
 static CONTEXT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Adiciona um segmento ao contexto (com trim para 40 entradas).
+/// Adiciona um segmento ao contexto (com trim para 80 entradas).
 fn push_context(speaker: &str, text: String) {
     let seq = CONTEXT_SEQ.fetch_add(1, Ordering::SeqCst);
     let mut log = CONTEXT_LOG.lock().unwrap_or_else(|e| e.into_inner());
     log.push((seq, speaker.to_string(), text));
     let len = log.len();
-    if len > 40 {
-        log.drain(..len - 40);
+    if len > 80 {
+        log.drain(..len - 80);
     }
 }
 
@@ -793,6 +883,127 @@ fn recent_context_segments(n: usize) -> Vec<ipc::TranscriptContextSegment> {
             start_ms: (i as i32) * 1_000,
         })
         .collect()
+}
+
+// ── Resumo rolante (contexto completo do copiloto — fase 1) ─────────────
+// O copiloto recebe, por análise: resumo rolante (histórico inteiro,
+// mantido pelo sidecar) + janela verbatim recente. O core só DISPARA o
+// rolamento; o corte e a persistência são decididos pelo sidecar com a
+// verdade do banco (POST /sessions/summary/roll).
+
+/// Total de segmentos persistidos na sessão corrente. Incrementado no loop
+/// de STT a cada post_transcript e zerado em start_meeting. É o gatilho
+/// barato local — contagens de corte reais ficam no banco do sidecar.
+static SESSION_SEGMENT_TOTAL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Segmentos já cobertos pelo resumo rolante (valor retornado pelo sidecar
+/// no último rolamento bem-sucedido). Zerado em start_meeting.
+static ROLLED_SEGMENT_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Dispara o rolamento quando há este volume de segmentos novos desde o
+/// último corte. Espelha o lado sidecar (ROLL_KEEP_RECENT + ROLL_MIN_BATCH
+/// = 16 + 8) para não POSTar à toa a cada ciclo de análise.
+const ROLL_TRIGGER_SEGMENTS: u64 = 24;
+
+/// True enquanto um POST de rolamento está em voo. Evita pilha de chamadas
+/// quando o rolamento demora mais que um ciclo de análise.
+static ROLL_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Millis (epoch) do último disparo de rolamento — backoff mínimo de 60s
+/// para não martelar o provedor de LLM quando ele está falhando.
+static ROLL_LAST_ATTEMPT_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Dispara o rolamento do resumo (fire-and-forget) quando há volume novo
+/// suficiente. Nunca bloqueia o loop de análise: o POST roda em thread
+/// própria e a única escrita de retorno é ROLLED_SEGMENT_COUNT. Falha de
+/// cofre/HTTP/provedor só loga — o próximo ciclo tenta de novo (com o
+/// backoff de ROLL_LAST_ATTEMPT_MS).
+fn maybe_roll_summary(port: u16, session_id: &str, cred: &serde_json::Value) {
+    use std::sync::atomic::Ordering;
+    let total = SESSION_SEGMENT_TOTAL.load(Ordering::SeqCst);
+    let rolled = ROLLED_SEGMENT_COUNT.load(Ordering::SeqCst);
+    if total.saturating_sub(rolled) < ROLL_TRIGGER_SEGMENTS {
+        return;
+    }
+    let now = now_millis();
+    let last = ROLL_LAST_ATTEMPT_MS.load(Ordering::SeqCst);
+    if now.saturating_sub(last) < 60_000 {
+        return;
+    }
+    if ROLL_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    ROLL_LAST_ATTEMPT_MS.store(now, Ordering::SeqCst);
+
+    // Mesma injeção de credencial do suggest (ADR-003): o core passa o
+    // secretRef e resolve o segredo do cofre só aqui, dentro da thread —
+    // o segredo real entra apenas no corpo deste POST.
+    let mut credential = ipc::InjectedCredential {
+        kind: serde_json::from_value(cred.get("kind").cloned().unwrap_or_default())
+            .unwrap_or(ipc::ProviderKind::Openai),
+        connection_mode: serde_json::from_value(
+            cred.get("connectionMode").cloned().unwrap_or_default(),
+        )
+        .unwrap_or(ipc::ProviderConnectionMode::ApiKey),
+        secret: cred
+            .get("secretRef")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        base_url: cred
+            .get("baseUrl")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        model: None,
+    };
+    let sid = session_id.to_string();
+    std::thread::spawn(move || {
+        match vault_resolve(&credential.secret) {
+            Ok(secret) => credential.secret = secret,
+            Err(e) => {
+                eprintln!("[ray] resumo rolante: cofre falhou: {e}");
+                ROLL_IN_FLIGHT.store(false, Ordering::SeqCst);
+                return;
+            }
+        }
+        let body = match serde_json::to_value(&ipc::RollSummaryRequest {
+            session_id: sid,
+            credential,
+        }) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[ray] resumo rolante: serialização falhou: {e}");
+                ROLL_IN_FLIGHT.store(false, Ordering::SeqCst);
+                return;
+            }
+        };
+        match sidecar_request(port, "POST", "/sessions/summary/roll", Some(body))
+            .and_then(unwrap_ipc)
+        {
+            Ok(v) => {
+                if v.get("updated").and_then(|u| u.as_bool()) == Some(true) {
+                    if let Some(n) =
+                        v.get("summarizedSegmentCount").and_then(|n| n.as_u64())
+                    {
+                        ROLLED_SEGMENT_COUNT.store(n, Ordering::SeqCst);
+                    }
+                }
+            }
+            Err(e) => eprintln!("[ray] resumo rolante falhou: {e}"),
+        }
+        ROLL_IN_FLIGHT.store(false, Ordering::SeqCst);
+    });
 }
 
 // ── Modo "Ouvir Segurando" (features.pushToListen) ──────────────────────
@@ -835,6 +1046,19 @@ fn apply_stored_features(port: u16) {
     }
 }
 
+/// Espelha o locale de STT persistido (settings.sttLanguage) no motor.
+/// Mesma via de apply_stored_features — sem isso o locale volta ao default
+/// a cada reinício, mesmo com o switch salvo em pt-BR ou en-US.
+fn apply_stored_stt_language(port: u16) {
+    if let Ok(raw) = sidecar_request(port, "GET", "/settings", None) {
+        if let Ok(settings) = unwrap_ipc(raw) {
+            if let Some(language) = settings.get("sttLanguage").and_then(|v| v.as_str()) {
+                stt::set_stt_language(language);
+            }
+        }
+    }
+}
+
 /// Seq corrente do contexto — o valor no instante do segurar delimita a
 /// janela do agente (held_context_segments).
 fn context_seq_now() -> u64 {
@@ -843,7 +1067,7 @@ fn context_seq_now() -> u64 {
 
 /// Segmentos de contexto com seq >= `mark` — exatamente o que foi dito
 /// enquanto o atalho esteve pressionado. Por seq (não por índice): o trim
-/// de 40 entradas do log não distorce a janela, por mais longo o segurar.
+/// de 80 entradas do log não distorce a janela, por mais longo o segurar.
 fn held_context_segments(mark: u64) -> Vec<ipc::TranscriptContextSegment> {
     let log = CONTEXT_LOG.lock().unwrap_or_else(|e| e.into_inner());
     log.iter()
@@ -992,6 +1216,10 @@ fn start_meeting(app: tauri::AppHandle, assistant_id: String) -> Result<String, 
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clear();
+    // Contadores do resumo rolante também recomeçam do zero — a sessão nova
+    // não tem segmentos nem rolamento herdados.
+    SESSION_SEGMENT_TOTAL.store(0, Ordering::SeqCst);
+    ROLLED_SEGMENT_COUNT.store(0, Ordering::SeqCst);
     let resp = sidecar_request(port, "POST", "/sessions/start", Some(body))?;
     let session_id = unwrap_ipc(resp)?
         .get("sessionId")
@@ -1098,14 +1326,18 @@ fn start_meeting(app: tauri::AppHandle, assistant_id: String) -> Result<String, 
                         serde_json::json!({ "speaker": label, "text": req.text }),
                     );
                     post_transcript(port, &sid, &req);
+                    // Alimenta o gatilho do resumo rolante (mesma sessão
+                    // que o post_transcript acabou de persistir).
+                    SESSION_SEGMENT_TOTAL.fetch_add(1, Ordering::SeqCst);
                 }
             }
         }
     });
 
-    // Loop de ANÁLISE (T-300s): a cada 10s roda o copiloto com o contexto
-    // recente (mínimo 2 segmentos novos). A credencial é resolvida do cofre
-    // como no suggest manual (ADR-003) — usa a primeira disponível.
+    // Loop de ANÁLISE (T-300s): a cada ANALYSIS_INTERVAL roda o copiloto com
+    // o contexto recente (mínimo 2 segmentos novos). A credencial é
+    // resolvida do cofre como no suggest manual (ADR-003) — usa a primeira
+    // disponível.
     let app_analysis = app.clone();
     let sid_analysis = session_id.clone();
     let assistant = if assistant_id.is_empty() {
@@ -1122,9 +1354,18 @@ fn start_meeting(app: tauri::AppHandle, assistant_id: String) -> Result<String, 
             if stop_analysis.load(Ordering::SeqCst) {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10_000));
+            std::thread::sleep(std::time::Duration::from_millis(ANALYSIS_INTERVAL_MS));
             if stop_analysis.load(Ordering::SeqCst) {
                 break;
+            }
+            // Resumo rolante: roda ANTES do gate do Ouvir Segurando — o
+            // histórico precisa virar memória mesmo quando a análise
+            // automática está desligada, porque os atalhos (Analisar
+            // Conversa / soltar do push-to-listen) também consultam a
+            // sessão. Sem credencial, só pula (o hint de configuração já
+            // é emitido pelo ciclo de suggest abaixo).
+            if let Some(cred) = preferred_credential(port) {
+                maybe_roll_summary(port, &sid_analysis, &cred);
             }
             // Modo Ouvir Segurando (features.pushToListen): o agente NÃO
             // recebe contexto por conta própria — a análise roda só quando
@@ -1139,7 +1380,7 @@ fn start_meeting(app: tauri::AppHandle, assistant_id: String) -> Result<String, 
                 let recent: Vec<(String, String)> = log
                     .iter()
                     .rev()
-                    .take(12)
+                    .take(RECENT_WINDOW)
                     .rev()
                     .map(|(_, speaker, text)| (speaker.clone(), text.clone()))
                     .collect();
@@ -1400,6 +1641,17 @@ fn list_assistants() -> Result<serde_json::Value, String> {
         return Err("sidecar not started".into());
     }
     unwrap_ipc(sidecar_request(port, "GET", "/assistants", None)?)
+}
+
+/// Remove um assistente USER (RF-336). BUILTIN (seed do copiloto) é recusado
+/// pelo sidecar; sessões e settings referenciam com SetNull no schema.
+#[tauri::command]
+fn delete_assistant(id: String) -> Result<serde_json::Value, String> {
+    let port = SIDECAR_PORT.load(Ordering::Acquire);
+    if port == 0 {
+        return Err("sidecar not started".into());
+    }
+    unwrap_ipc(sidecar_request(port, "DELETE", &format!("/assistants/{id}"), None)?)
 }
 
 // ── helpers locais de parsing de resposta do sidecar ─────────────────────
@@ -1722,8 +1974,9 @@ fn preferred_credential(port: u16) -> Option<serde_json::Value> {
 /// Roda o copiloto a partir de um atalho: monta o SuggestRequest com o
 /// contexto de transcrição acumulado (se houver reunião ativa) e faz o
 /// streaming para o Overlay via `suggest-stream`. `context_override`
-/// substitui o "últimos 12 segmentos" — usado pelo soltar do modo Ouvir
-/// Segurando, que entrega ao agente SÓ o trecho do intervalo do segurar.
+/// substitui os últimos RECENT_WINDOW segmentos — usado pelo soltar do
+/// modo Ouvir Segurando, que entrega ao agente SÓ o trecho do intervalo
+/// do segurar.
 fn shortcut_suggest(
     app: &tauri::AppHandle,
     trigger: ipc::SuggestionTrigger,
@@ -1768,7 +2021,7 @@ fn shortcut_suggest(
         session_id,
         assistant_id,
         trigger,
-        context: context_override.unwrap_or_else(|| recent_context_segments(12)),
+        context: context_override.unwrap_or_else(|| recent_context_segments(RECENT_WINDOW)),
         user_prompt,
         screenshots,
         selection_text: None,
@@ -2394,8 +2647,9 @@ pub fn run() {
             // Stealth ativo por padrao: o uso completo e o default e as
             // janelas nascem fora da captura de tela (ADR-008). O overlay
             // tambem precisa (ADR-008: "a home nao precisa de stealth; o
-            // overlay sim").
-            for label in ["appbar", "main", "notch", "overlay"] {
+            // overlay sim"). Mesma lista do comando set_stealth — o modo é
+            // global, senão o toggle da AppBar não desfaz o que nasce aqui.
+            for label in windows::STEALTH_WINDOWS {
                 if app.get_webview_window(label).is_some() {
                     windows::set_capture_excluded(label, true);
                 }
@@ -2433,6 +2687,9 @@ pub fn run() {
                         // o núcleo consome (features.pushToListen → gate do
                         // agente) — a configuração sobrevive ao reinício.
                         apply_stored_features(s.port);
+                        // Locale de STT persistido: reconhecedor nasce no
+                        // idioma escolhido (pt-BR/en-US), não no do sistema.
+                        apply_stored_stt_language(s.port);
                     }
                     Err(e) => eprintln!("[ray] sidecar falhou ao iniciar: {e}"),
                 }
@@ -2465,11 +2722,15 @@ pub fn run() {
             stop_meeting,
             validate_credential,
             create_assistant,
+            delete_assistant,
             list_assistants,
             list_sessions,
             get_session,
+            export_session_report,
             get_app_settings,
             save_feature_toggles,
+            save_stt_language,
+            save_overlay_template,
             get_shortcuts,
             apply_shortcuts,
             permissions::get_permission_status,

@@ -152,6 +152,42 @@ fn speaker_label(speaker: &Speaker) -> &'static str {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Idioma de reconhecimento de fala (settings.sttLanguage)
+// ---------------------------------------------------------------------------
+
+/// Locales do switch "Áudio e Tela" (contracts/settings.ts, SttLanguage). O
+/// SFSpeechRecognizer criado sem locale herda o locale DO DISPOSITIVO — num
+/// macOS em inglês, fala em pt-BR não é transcrita. O locale explícito
+/// resolve; o índice é espelhado do sidecar por save_stt_language e no boot
+/// (apply_stored_stt_language).
+pub(crate) const STT_LANGUAGE_IDS: [&str; 2] = ["pt-BR", "en-US"];
+
+static STT_LANGUAGE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Índice corrente em STT_LANGUAGE_IDS (só set_stt_language escreve, sempre
+/// in-bounds).
+pub(crate) fn stt_language_index() -> usize {
+    STT_LANGUAGE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Espelha settings.sttLanguage no motor de STT. Id fora do contrato é
+/// ignorado (retorna false) — a validação estrita vive no sidecar.
+pub(crate) fn set_stt_language(id: &str) -> bool {
+    match STT_LANGUAGE_IDS.iter().position(|&known| known == id) {
+        Some(index) => {
+            STT_LANGUAGE.store(index, std::sync::atomic::Ordering::SeqCst);
+            true
+        }
+        None => false,
+    }
+}
+
+fn current_stt_language() -> &'static str {
+    STT_LANGUAGE_IDS[stt_language_index()]
+}
+
 // ===========================================================================
 // Apple Speech — macOS (ADR-007)
 //
@@ -278,8 +314,10 @@ impl SttEngine for PlaceholderWindows {
 // ===========================================================================
 // SFSpeechRecognizer REAL — on-device (ADR-007), via objc2 puro.
 //
-// Janela de 6s: áudio entra como AVAudioPCMBuffer int16 mono 16k; ao fechar
-// a janela, endAudio → resultado final → segmento; novo request emenda.
+// Fechamento por PAUSA DE FALA: áudio entra como AVAudioPCMBuffer int16 mono
+// 16k; energia é medida em blocos de 100ms e o segmento fecha em 800ms de
+// silêncio (frases inteiras) ou no teto de 10s (fala contínua). Ao fechar,
+// endAudio → resultado final → segmento; novo request emenda.
 // ===========================================================================
 
 #[cfg(target_os = "macos")]
@@ -298,8 +336,25 @@ mod sfs {
     use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    /// Duração do segmento emitido (ms). 6s equilibra latência e acurácia.
-    const SEGMENT_MS: i32 = 6_000;
+    /// Duração máxima do segmento (ms). Fechamento é por PAUSA DE FALA, não
+    /// por janela fixa: o segmento fecha após 800ms consecutivos de silêncio
+    /// (frases inteiras sobrevivem à emenda); fala contínua sem pausa cai no
+    /// teto de 10s — antes era janela fixa de 6s, cortando no meio da frase.
+    const MAX_SEGMENT_MS: i32 = 10_000;
+    /// Segmento só fecha por pausa depois de 1,2s de áudio — interjeições
+    /// curtas ("ah", "hm") não abrem segmento próprio.
+    const MIN_SEGMENT_MS: i32 = 1_200;
+    /// Pausa que fecha o segmento: ms consecutivos de blocos sem fala.
+    const PAUSE_MS: i32 = 800;
+    /// Energia é analisada em blocos de 100ms (1600 samples @ 16kHz).
+    const ENERGY_BLOCK_MS: i32 = 100;
+    const ENERGY_BLOCK_SAMPLES: usize = 1_600;
+    /// Piso absoluto de fala (RMS na escala int16, ~-41 dBFS): abaixo disso é
+    /// silêncio mesmo que o pico do segmento seja baixo.
+    const SPEECH_RMS_ABS: f32 = 300.0;
+    /// Histerese relativa: um bloco precisa de ≥10% do pico do segmento para
+    /// contar como fala — respiração/ruído logo após fala alta conta como pausa.
+    const SPEECH_PEAK_RATIO: f32 = 0.1;
     /// Samples por ms @ 16kHz mono.
     const SAMPLES_PER_MS: f64 = 16.0;
     /// Timeout do resultado final do recognizer.
@@ -326,6 +381,27 @@ mod sfs {
         } else {
             2
         }
+    }
+
+    /// RMS de um chunk int16 (escala 0..=32768).
+    pub(super) fn rms_i16(pcm: &[i16]) -> f32 {
+        if pcm.is_empty() {
+            return 0.0;
+        }
+        let sum_sq: f64 = pcm
+            .iter()
+            .map(|&s| {
+                let v = s as f64;
+                v * v
+            })
+            .sum();
+        (sum_sq / pcm.len() as f64).sqrt() as f32
+    }
+
+    /// Um bloco de 100ms é fala se passa do piso absoluto e de 10% do pico do
+    /// segmento (histerese relativa contra respiração/ruído pós-pico).
+    pub(super) fn block_is_speech(block_rms: f32, seg_peak_rms: f32) -> bool {
+        block_rms >= SPEECH_RMS_ABS && block_rms >= seg_peak_rms * SPEECH_PEAK_RATIO
     }
 
     fn now_ms() -> u64 {
@@ -384,6 +460,15 @@ mod sfs {
         backlog: Vec<i16>,
         segment_start_ms: i32,
         pending_ms: i32,
+        /// Detecção de pausa: acumuladores do bloco de energia de 100ms.
+        block_sum_sq: f64,
+        block_samples: usize,
+        /// Pico de RMS dentro do segmento corrente (histerese relativa).
+        seg_peak_rms: f32,
+        /// Silêncio consecutivo no rabo do segmento (ms).
+        silence_ms: i32,
+        /// Já houve bloco de fala no segmento — pausa só fecha depois de fala.
+        heard_speech: bool,
     }
 
     impl SfsEngine {
@@ -395,8 +480,24 @@ mod sfs {
             {
                 return None;
             }
-            // Sem locale explícito: usa o locale do dispositivo (ADR-007).
-            let recognizer = unsafe { SFSpeechRecognizer::init(SFSpeechRecognizer::alloc())? };
+            // Locale EXPLÍCITO (settings.sttLanguage) — sem isso o
+            // recognizer herda o locale do dispositivo. Locale não suportado
+            // pelo sistema → fallback para o init padrão (comportamento
+            // antigo) em vez de ficar sem engine.
+            let requested = super::current_stt_language();
+            let recognizer = unsafe {
+                let ns_locale = objc2_foundation::NSLocale::initWithLocaleIdentifier(
+                    objc2_foundation::NSLocale::alloc(),
+                    &objc2_foundation::NSString::from_str(requested),
+                );
+                SFSpeechRecognizer::initWithLocale(SFSpeechRecognizer::alloc(), &ns_locale)
+            }
+            .or_else(|| {
+                eprintln!(
+                    "[stt] apple speech({label}): locale {requested} indisponível — caindo para o locale do dispositivo"
+                );
+                unsafe { SFSpeechRecognizer::init(SFSpeechRecognizer::alloc()) }
+            })?;
             unsafe { recognizer.setSupportsOnDeviceRecognition(true) };
 
             // Diagnóstico do 1110: locale corrente e disponibilidade do
@@ -405,7 +506,7 @@ mod sfs {
             let locale_id = unsafe { recognizer.locale().localeIdentifier().to_string() };
             let on_device = unsafe { recognizer.supportsOnDeviceRecognition() };
             eprintln!(
-                "[stt] apple speech({label}): locale={locale_id} on-device={on_device}"
+                "[stt] apple speech({label}): pedido={requested} locale={locale_id} on-device={on_device}"
             );
 
             // AVAudioCommonFormat.pcmFormatInt16; mono 16kHz, não-interleaved.
@@ -433,6 +534,11 @@ mod sfs {
                 backlog: Vec::new(),
                 segment_start_ms: 0,
                 pending_ms: 0,
+                block_sum_sq: 0.0,
+                block_samples: 0,
+                seg_peak_rms: 0.0,
+                silence_ms: 0,
+                heard_speech: false,
             })
         }
 
@@ -553,6 +659,12 @@ mod sfs {
             }
             self.segment_start_ms += self.pending_ms;
             self.pending_ms = 0;
+            // Reset do estado de energia — o próximo segmento começa limpo.
+            self.block_sum_sq = 0.0;
+            self.block_samples = 0;
+            self.seg_peak_rms = 0.0;
+            self.silence_ms = 0;
+            self.heard_speech = false;
 
             // Fecha a janela e DEVOLVE o slot: o próximo request nasce no
             // próximo feed_pcm, alternando a vez entre os canais (um task
@@ -602,7 +714,41 @@ mod sfs {
             };
             self.append_pcm(request, pcm);
             self.pending_ms += (pcm.len() as f64 / SAMPLES_PER_MS) as i32;
-            if self.pending_ms >= SEGMENT_MS {
+
+            // Energia em blocos de 100ms — alimenta o fechamento por pausa.
+            // Só o chunk AO VIVO é classificado; backlog derramado ao ganhar
+            // o slot entra sem classificação (o estado de silêncio começa
+            // zerado no segmento, seguro por causa do teto de 10s).
+            let mut offset = 0usize;
+            while offset < pcm.len() {
+                let take = (ENERGY_BLOCK_SAMPLES - self.block_samples).min(pcm.len() - offset);
+                for &sample in &pcm[offset..offset + take] {
+                    let v = sample as f64;
+                    self.block_sum_sq += v * v;
+                }
+                self.block_samples += take;
+                offset += take;
+                if self.block_samples >= ENERGY_BLOCK_SAMPLES {
+                    let block_rms = (self.block_sum_sq / self.block_samples as f64).sqrt() as f32;
+                    if block_rms > self.seg_peak_rms {
+                        self.seg_peak_rms = block_rms;
+                    }
+                    if block_is_speech(block_rms, self.seg_peak_rms) {
+                        self.silence_ms = 0;
+                        self.heard_speech = true;
+                    } else {
+                        self.silence_ms += ENERGY_BLOCK_MS;
+                    }
+                    self.block_sum_sq = 0.0;
+                    self.block_samples = 0;
+                }
+            }
+
+            // Fecha por PAUSA (frase acabou) ou por TETO (fala contínua).
+            let pause_close = self.heard_speech
+                && self.silence_ms >= PAUSE_MS
+                && self.pending_ms >= MIN_SEGMENT_MS;
+            if self.pending_ms >= MAX_SEGMENT_MS || pause_close {
                 return Ok(self.close_segment());
             }
             Ok(vec![])
@@ -905,6 +1051,57 @@ mod tests {
     /// Serializes production-path tests that share the global ENGINE static.
     /// Without this, parallel tests corrupt each other's accumulated PCM state.
     static PRODUCTION_SERIAL: Mutex<()> = Mutex::new(());
+
+    // -- Locale de STT (settings.sttLanguage) ---------------------------------
+    // Um único teste: o locale é um static de processo e testes paralelos
+    // competiriam pelo valor.
+
+    #[test]
+    fn stt_language_mirrors_contract_ids_and_rejects_unknown() {
+        assert_eq!(current_stt_language(), "pt-BR");
+
+        assert!(set_stt_language("en-US"));
+        assert_eq!(current_stt_language(), "en-US");
+
+        assert!(set_stt_language("pt-BR"));
+        assert_eq!(current_stt_language(), "pt-BR");
+
+        assert!(!set_stt_language("es-ES"));
+        assert_eq!(current_stt_language(), "pt-BR");
+    }
+
+    // -- Detecção de pausa (fechamento de segmento por silêncio) -------------
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rms_i16_measures_energy() {
+        use super::sfs::rms_i16;
+
+        assert_eq!(rms_i16(&[]), 0.0);
+        assert_eq!(rms_i16(&[0; 1_600]), 0.0);
+        // Constante em meia escala → RMS = própria amplitude.
+        let loud = rms_i16(&[16_384; 1_600]);
+        assert!((loud - 16_384.0).abs() < 1.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn block_is_speech_applies_absolute_floor_and_peak_hysteresis() {
+        use super::sfs::block_is_speech;
+
+        // Ruído fraco não é fala nem com pico alto no segmento.
+        assert!(!block_is_speech(200.0, 8_000.0));
+        // Fala clara é fala (passa do piso e do relativo).
+        assert!(block_is_speech(4_000.0, 4_000.0));
+        // Histerese relativa: logo após um pico de 8000, bloco de 500 é
+        // respiração/ruído (abaixo de 10% do pico) — pausa.
+        assert!(!block_is_speech(500.0, 8_000.0));
+        // Já 900 (≥ 10% de 8000) segue contando como fala.
+        assert!(block_is_speech(900.0, 8_000.0));
+        // Com pico baixo, a régua é o piso absoluto.
+        assert!(!block_is_speech(250.0, 250.0));
+        assert!(block_is_speech(350.0, 350.0));
+    }
 
     // -- Mock engine -----------------------------------------------------------
 

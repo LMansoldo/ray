@@ -101,6 +101,7 @@ export type IpcEndpoints = {
   "POST /sessions/start": { req: StartSessionRequest; res: IpcResult<StartSessionResponse> };
   "POST /sessions/transcript": { req: AppendTranscriptRequest; res: IpcResult<{ segmentId: string }> };
   "POST /sessions/end": { req: EndSessionRequest; res: IpcResult<EndSessionResponse> };
+  "POST /sessions/summary/roll": { req: RollSummaryRequest; res: IpcResult<RollSummaryResponse> };
   "POST /translate": { req: TranslateRequest; res: IpcResult<TranslateResponse> };
   "POST /credentials": { req: SaveCredentialRequest; res: IpcResult<SaveCredentialResponse> };
   "DELETE /credentials": { req: DeleteCredentialRequest; res: IpcResult<{ deleted: boolean }> };

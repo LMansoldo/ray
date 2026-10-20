@@ -50,7 +50,8 @@ keyring = { version = "3", features = ["apple-native"] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView"] }
 # Permissoes TCC (mic/fala): AVCaptureDevice + SFSpeechRecognizer via msg_send.
-objc2-foundation = { version = "0.3", features = ["NSString"] }
+# NSLocale: locale explícito do SFSpeechRecognizer (settings.sttLanguage).
+objc2-foundation = { version = "0.3", features = ["NSString", "NSLocale"] }
 # STT real (ADR-007): SFSpeechRecognizer + AVAudioFormat/AVAudioPCMBuffer.
 objc2-speech = { version = "0.3", features = [
     "SFSpeechRecognizer",

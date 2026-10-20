@@ -342,6 +342,34 @@ pub struct EndSessionResponse {
     pub summary_id: Option<String>,
 }
 
+/// POST /sessions/summary/roll (core → sidecar): dispara a atualização do
+/// resumo rolante da sessão — a camada de memória que dá ao copiloto o
+/// contexto completo da reunião, além da janela verbatim de segmentos.
+/// O sidecar decide o corte real (contagem de segmentos no banco); o core
+/// só sinaliza que há volume novo. Credencial injetada pelo core como no
+/// suggest (ADR-003): o segredo real entra APENAS no corpo, resolvido do
+/// cofre na hora da chamada.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "ipc.ts")]
+#[serde(rename_all = "camelCase")]
+pub struct RollSummaryRequest {
+    pub session_id: String,
+    pub credential: InjectedCredential,
+}
+
+/// Resposta do rolamento. `updated: false` cobre os no-ops: volume abaixo
+/// do lote mínimo ou rolamento já em andamento para a sessão.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "ipc.ts")]
+#[serde(rename_all = "camelCase")]
+pub struct RollSummaryResponse {
+    pub updated: bool,
+    #[ts(optional)]
+    pub summary: Option<String>,
+    #[ts(optional)]
+    pub summarized_segment_count: Option<u64>,
+}
+
 // ── Persistência de credenciais (T-302/T-406) ────────────────────────────
 
 /// Payload de POST /credentials (core → sidecar).

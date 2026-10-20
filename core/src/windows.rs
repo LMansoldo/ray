@@ -555,6 +555,13 @@ fn dispatch_opacity(window_label: &str, opacity: f64) {
 
 // ── Window control functions ───────────────────────────────────────────────
 
+/// Janelas que participam do modo stealth (ADR-008). Fonte única usada pelo
+/// setup (todas nascem capture-excluded) e pelo comando `set_stealth` (o
+/// toggle da AppBar aplica o modo em TODAS — modo é global; alternar só uma
+/// janela deixava as demais invisíveis à captura mesmo com o stealth
+/// "desligado", que era exatamente o bug reportado).
+pub const STEALTH_WINDOWS: [&str; 4] = ["appbar", "main", "notch", "overlay"];
+
 /// Ativa/desativa a exclusao de captura (stealth) numa janela.
 /// Windows: SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE).
 /// macOS: NSWindow sharingType = .none.
