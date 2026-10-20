@@ -32,7 +32,9 @@ export async function initDb(): Promise<void> {
     SENTINEL_TABLE,
   )) as Array<{ name: string }>;
   if (Array.isArray(existing) && existing.length > 0) {
-    return; // schema ja aplicado
+    // schema ja aplicado — só garantem colunas de versões posteriores.
+    await ensurePostBootColumns();
+    return;
   }
 
   let sql: string | undefined;
@@ -67,6 +69,58 @@ export async function initDb(): Promise<void> {
   process.stderr.write(
     `[sidecar] database initialized from ${usedFrom} (${statements.length} statements)\n`,
   );
+
+  await ensurePostBootColumns();
+}
+
+/**
+ * Colunas acrescentadas ao schema depois do primeiro boot de um usuário.
+ * O initDb só aplica o DDL completo quando o banco NÃO existe — sem este
+ * passo, bancos já existentes ficariam sem as colunas novas e toda query
+ * do Prisma que as tocasse falharia. Idempotente: PRAGMA antes de cada
+ * ALTER, custo desprezível no boot.
+ */
+async function ensurePostBootColumns(): Promise<void> {
+  const cols = (await prisma.$queryRawUnsafe<Array<{ name: string }>>(
+    'PRAGMA table_info("Session")',
+  )) as Array<{ name: string }>;
+  const names = new Set(cols.map((c) => c.name));
+  if (!names.has("rollingSummary")) {
+    await prisma.$executeRawUnsafe(
+      'ALTER TABLE "Session" ADD COLUMN "rollingSummary" TEXT',
+    );
+  }
+  if (!names.has("summarizedSegmentCount")) {
+    await prisma.$executeRawUnsafe(
+      'ALTER TABLE "Session" ADD COLUMN "summarizedSegmentCount" INTEGER NOT NULL DEFAULT 0',
+    );
+  }
+
+  // Settings.sttLanguage — locale de STT (contracts/settings.ts). Coluna
+  // acrescentada depois do primeiro boot; bancos antigos ganham a coluna
+  // com o default do contrato.
+  const settingsCols = (await prisma.$queryRawUnsafe<Array<{ name: string }>>(
+    'PRAGMA table_info("Settings")',
+  )) as Array<{ name: string }>;
+  const settingsNames = new Set(settingsCols.map((c) => c.name));
+  if (!settingsNames.has("sttLanguage")) {
+    await prisma.$executeRawUnsafe(
+      "ALTER TABLE \"Settings\" ADD COLUMN \"sttLanguage\" TEXT NOT NULL DEFAULT 'pt-BR'",
+    );
+  }
+  // Overlay customizado (contracts/settings.ts): template HTML+CSS do
+  // usuário + flag de ativação. Mesmo motivo do sttLanguage — bancos
+  // antigos ganham as colunas com os defaults do contrato.
+  if (!settingsNames.has("overlayTemplateEnabled")) {
+    await prisma.$executeRawUnsafe(
+      'ALTER TABLE "Settings" ADD COLUMN "overlayTemplateEnabled" BOOLEAN NOT NULL DEFAULT false',
+    );
+  }
+  if (!settingsNames.has("overlayTemplate")) {
+    await prisma.$executeRawUnsafe(
+      "ALTER TABLE \"Settings\" ADD COLUMN \"overlayTemplate\" TEXT NOT NULL DEFAULT ''",
+    );
+  }
 }
 
 /// Seed minimo de primeiro boot: usuario local + assistente BUILTIN padrao.

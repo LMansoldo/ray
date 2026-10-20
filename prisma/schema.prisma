@@ -92,6 +92,16 @@ model Settings {
   features   String @default("{}")
   shortcuts  String @default("{}")
 
+  // Locale de reconhecimento de fala (contracts/settings.ts SttLanguage).
+  // Locale EXPLÍCITO do motor de STT — sem isso o recognizer herda o locale
+  // do dispositivo e pt-BR não é transcrito num macOS em inglês.
+  sttLanguage String @default("pt-BR")
+
+  // Overlay customizado: template HTML+CSS do usuário (contrato em
+  // contracts/settings.ts). Desligado/default = InsightCard embutido.
+  overlayTemplateEnabled Boolean @default(false)
+  overlayTemplate  String  @default("")
+
   // Retenção de sessões em dias; null = manter indefinidamente (RNF-204).
   retentionDays Int?
 
@@ -216,6 +226,15 @@ model Session {
 
   startedAt DateTime  @default(now())
   endedAt   DateTime?
+
+  // Resumo rolante (contexto completo do copiloto — fase 1): texto curto
+  // mantido incrementalmente pelo sidecar, cobrindo os segmentos que já
+  // saíram da janela verbatim enviada em cada análise. Injetado no prompt
+  // do suggest; nunca contém o segredo de credencial.
+  rollingSummary String?
+  // Quantidade de segmentos (em ordem de startMs) já coberta por
+  // rollingSummary — marca de corte do próximo rolamento.
+  summarizedSegmentCount Int @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

@@ -12,7 +12,7 @@
 // 5. Graph is provider-agnostic: depends on AiProvider, never imports a
 //    concrete adapter.
 
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Fake AiProvider — emits deterministic tokens, captures the system prompt
@@ -104,6 +104,10 @@ vi.mock("../db.js", () => ({
         const a = assistants.get(where.id);
         return a ? { ...a } : null;
       }),
+    },
+    // Sessão sem resumo rolante: o copiloto roda só com a janela verbatim.
+    session: {
+      findUnique: vi.fn(async () => null),
     },
     $disconnect: vi.fn(async () => {}),
   },
@@ -412,5 +416,178 @@ describe("analyze (T-102)", () => {
     if (result.ok) return;
     expect(result.error.code).toBeTruthy();
     expect(result.error.message.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Injeção do resumo rolante (memória da reunião — fase 1)
+// ---------------------------------------------------------------------------
+
+import { runSuggestStream, runAnalyze } from "./graph.js";
+
+describe("meetingSummary injection (resumo rolante)", () => {
+  const req = makeRequest("a1");
+
+  it("appends the rolling summary to the assistant's system prompt", async () => {
+    seedAssistant("a1", "General", "You are a general assistant.");
+    fakeProvider.lastSystemPrompt = undefined;
+
+    const events = await collectEvents(
+      runSuggestStream(req, "You are a general assistant.", fakeProvider, "Decisão: migrar o banco."),
+    );
+
+    expect(events[0].type).toBe("start");
+    expect(fakeProvider.lastSystemPrompt).toContain("You are a general assistant.");
+    expect(fakeProvider.lastSystemPrompt).toContain("Decisão: migrar o banco.");
+  });
+
+  it("keeps the system prompt untouched when there is no summary", async () => {
+    fakeProvider.lastSystemPrompt = undefined;
+
+    await collectEvents(
+      runSuggestStream(req, "You are a general assistant.", fakeProvider, null),
+    );
+    expect(fakeProvider.lastSystemPrompt).toBe("You are a general assistant.");
+
+    await collectEvents(
+      runSuggestStream(req, "You are a general assistant.", fakeProvider, "   "),
+    );
+    expect(fakeProvider.lastSystemPrompt).toBe("You are a general assistant.");
+  });
+
+  it("analyze injects the summary too", async () => {
+    fakeProvider.lastSystemPrompt = undefined;
+
+    await runAnalyze(req, "You are a general assistant.", fakeProvider, "Resumo rolante de teste.");
+
+    expect(fakeProvider.lastSystemPrompt).toContain("Resumo rolante de teste.");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Campos do card no evento start (RF-331: ELES DISSERAM / contexto)
+// ---------------------------------------------------------------------------
+
+describe("start event card fields (theySaid / contextLabel)", () => {
+  it("carries the last OTHERS utterance as theySaid", async () => {
+    seedAssistant("a1", "General", "You are a general assistant.");
+
+    const req = makeRequest("a1");
+    req.context = [
+      { speaker: "OTHERS", text: "Primeira fala do cliente.", startMs: 0 },
+      { speaker: "SELF", text: "Minha resposta.", startMs: 3_000 },
+      { speaker: "OTHERS", text: "E o prazo de entrega?", startMs: 6_000 },
+    ];
+
+    const events = await collectEvents(suggestStream(req));
+    const startEvent = events[0];
+    expect(startEvent.type).toBe("start");
+    if (startEvent.type === "start") {
+      expect(startEvent.theySaid).toBe("E o prazo de entrega?");
+    }
+  });
+
+  it("carries a contextLabel describing the trigger", async () => {
+    seedAssistant("a1", "General", "You are a general assistant.");
+
+    const events = await collectEvents(suggestStream(makeRequest("a1")));
+    const startEvent = events[0];
+    expect(startEvent.type).toBe("start");
+    if (startEvent.type === "start") {
+      expect(typeof startEvent.contextLabel).toBe("string");
+      expect(startEvent.contextLabel!.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("omits theySaid when the context has no OTHERS utterance", async () => {
+    seedAssistant("a1", "General", "You are a general assistant.");
+
+    const req = makeRequest("a1");
+    req.context = [{ speaker: "SELF", text: "Só eu falando.", startMs: 0 }];
+
+    const events = await collectEvents(suggestStream(req));
+    const startEvent = events[0];
+    expect(startEvent.type).toBe("start");
+    if (startEvent.type === "start") {
+      expect(startEvent.theySaid).toBeUndefined();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Busca web (DuckDuckGo) injetada no system prompt — só em triggers de
+// pergunta; falha de busca nunca derruba a sugestão.
+// ---------------------------------------------------------------------------
+
+const DDG_FETCH_OK = async () => ({
+  ok: true,
+  text: async () =>
+    `<h2 class="result__title"><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fanswer&amp;rut=x">Example answer</a></h2>` +
+    `<a class="result__snippet" href="x">A useful snippet</a>`,
+});
+
+describe("web search injection (DuckDuckGo)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("ASK_ANYTHING appends the search results to the system prompt and still completes", async () => {
+    seedAssistant("a1", "General", "You are a general assistant.");
+    const fetchMock = vi.fn(DDG_FETCH_OK);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const req = makeRequest("a1");
+    req.trigger = "ASK_ANYTHING";
+    req.userPrompt = "what is the latest node lts?";
+
+    const events = await collectEvents(suggestStream(req));
+
+    expect(fakeProvider.lastSystemPrompt).toContain(
+      "You are a general assistant.",
+    );
+    expect(fakeProvider.lastSystemPrompt).toContain("## Resultados da web");
+    expect(fakeProvider.lastSystemPrompt).toContain(
+      "[Example answer](https://example.com/answer)",
+    );
+    // O stream segue íntegro: start → token* → done
+    expect(events[0].type).toBe("start");
+    expect(events[events.length - 1].type).toBe("done");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("live triggers do not search (fetch is never called)", async () => {
+    seedAssistant("a1", "General", "You are a general assistant.");
+    const fetchMock = vi.fn(DDG_FETCH_OK);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await collectEvents(suggestStream(makeRequest("a1"))); // trigger AUTO
+
+    expect(fakeProvider.lastSystemPrompt).toBe(
+      "You are a general assistant.",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("a failing search never fails the suggestion", async () => {
+    seedAssistant("a1", "General", "You are a general assistant.");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("The operation was aborted");
+      }),
+    );
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const req = makeRequest("a1");
+    req.trigger = "ASK_ANYTHING";
+    req.userPrompt = "anything";
+
+    const events = await collectEvents(suggestStream(req));
+
+    expect(events[events.length - 1].type).toBe("done");
+    expect(fakeProvider.lastSystemPrompt).not.toContain(
+      "## Resultados da web",
+    );
   });
 });

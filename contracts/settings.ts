@@ -67,6 +67,58 @@ export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
 };
 
 // ---------------------------------------------------------------------
+// Idioma da captação de fala (STT)
+// ---------------------------------------------------------------------
+
+/**
+ * Locales de reconhecimento de fala suportados pelo switch de "Áudio e
+ * Tela". O valor é o locale EXPLÍCITO passado ao motor de STT
+ * (SFSpeechRecognizer no macOS via NSLocale) — sem isso o recognizer herda
+ * o locale do dispositivo e, num macOS em inglês, fala em pt-BR não é
+ * transcrita. IDs são BCP 47 válidos para o Apple Speech.
+ */
+export const STT_LANGUAGE_IDS = ["pt-BR", "en-US"] as const;
+
+export type SttLanguage = (typeof STT_LANGUAGE_IDS)[number];
+
+/**
+ * Default: pt-BR. Antes deste campo o recognizer usava o locale do
+ * dispositivo; o produto é voltado a reuniões em português, então nasce
+ * fixado em pt-BR (o switch em Áudio e Tela devolve o inglês).
+ */
+export const DEFAULT_STT_LANGUAGE: SttLanguage = "pt-BR";
+
+/** Type guard canônico — leitura tolerante, escrita estrita (mesma regra dos blobs). */
+export function isSttLanguage(value: unknown): value is SttLanguage {
+  return (
+    typeof value === "string" &&
+    (STT_LANGUAGE_IDS as readonly string[]).includes(value)
+  );
+}
+
+// ---------------------------------------------------------------------
+// Overlay customizado (template HTML+CSS)
+// ---------------------------------------------------------------------
+
+/**
+ * Limite de tamanho do template de overlay. Um HTML+CSS de card tem ordens
+ * de grandeza abaixo disso; o teto existe para o PUT /settings recusar
+ * payloads desproporcionais (escrita estrita) sem criar DoS de banco.
+ */
+export const OVERLAY_TEMPLATE_MAX_LENGTH = 200_000;
+
+/**
+ * Type guard canônico do template de overlay: string (possivelmente vazia —
+ * vazio = "usar o InsightCard embutido") com no máximo
+ * OVERLAY_TEMPLATE_MAX_LENGTH caracteres.
+ */
+export function isOverlayTemplate(value: unknown): value is string {
+  return (
+    typeof value === "string" && value.length <= OVERLAY_TEMPLATE_MAX_LENGTH
+  );
+}
+
+// ---------------------------------------------------------------------
 // Atalhos de teclado (RF-600)
 // ---------------------------------------------------------------------
 

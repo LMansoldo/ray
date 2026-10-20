@@ -30,6 +30,8 @@ interface StoredSession {
   sourceLanguage: string | null;
   targetLanguage: string | null;
   assistantId: string | null;
+  rollingSummary: string | null;
+  summarizedSegmentCount: number;
   startedAt: Date;
   endedAt: Date | null;
   createdAt: Date;
@@ -72,6 +74,8 @@ let sessions: Map<string, StoredSession> = new Map();
 let segments: Map<string, StoredSegment> = new Map();
 let assistants: Map<string, StoredAssistant> = new Map();
 let summaries: Map<string, StoredSummary> = new Map();
+// Linha única de Settings (userId "local" é unique no schema).
+let settingsRows: Map<string, Record<string, unknown>> = new Map();
 let idCounter = 0;
 
 function resetStore() {
@@ -79,6 +83,7 @@ function resetStore() {
   segments = new Map();
   assistants = new Map();
   summaries = new Map();
+  settingsRows = new Map();
   idCounter = 0;
 }
 
@@ -106,6 +111,8 @@ vi.mock("./db.js", () => {
             sourceLanguage: (data.sourceLanguage as string) ?? null,
             targetLanguage: (data.targetLanguage as string) ?? null,
             assistantId: (data.assistantId as string) ?? null,
+            rollingSummary: (data.rollingSummary as string) ?? null,
+            summarizedSegmentCount: (data.summarizedSegmentCount as number) ?? 0,
             startedAt: (data.startedAt as Date) ?? now,
             endedAt: null,
             createdAt: now,
@@ -157,12 +164,29 @@ vi.mock("./db.js", () => {
           return count;
         }),
         findMany: vi.fn(
-          async ({ where }: { where: { sessionId: string } }) => {
+          async ({
+            where,
+            orderBy,
+            skip,
+            take,
+          }: {
+            where: { sessionId: string };
+            orderBy?: Array<Record<string, string>>;
+            skip?: number;
+            take?: number;
+          }) => {
             const result: StoredSegment[] = [];
             for (const seg of segments.values()) {
               if (seg.sessionId === where.sessionId) result.push({ ...seg });
             }
-            return result;
+            // Ordenação usada pelo resumo rolante (startMs asc).
+            if (orderBy?.[0]?.startMs === "asc") {
+              result.sort((a, b) => a.startMs - b.startMs);
+            }
+            const start = skip ?? 0;
+            return take === undefined
+              ? result.slice(start)
+              : result.slice(start, start + take);
           },
         ),
       },
@@ -224,6 +248,23 @@ vi.mock("./db.js", () => {
         count: vi.fn(async () => {
           return assistants.size;
         }),
+        findMany: vi.fn(async () => {
+          return Array.from(assistants.values())
+            .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+            .map((a) => ({ ...a }));
+        }),
+        findUnique: vi.fn(async ({ where }: { where: { id: string } }) => {
+          const assistant = assistants.get(where.id);
+          return assistant ? { ...assistant } : null;
+        }),
+        delete: vi.fn(async ({ where }: { where: { id: string } }) => {
+          const assistant = assistants.get(where.id);
+          if (!assistant) {
+            throw new Error(`Assistant not found: ${where.id}`);
+          }
+          assistants.delete(where.id);
+          return { ...assistant };
+        }),
       },
       summary: {
         create: vi.fn(
@@ -256,6 +297,42 @@ vi.mock("./db.js", () => {
           },
         ),
       },
+      settings: {
+        findUnique: vi.fn(async ({ where }: { where: { userId: string } }) => {
+          const row = settingsRows.get(where.userId);
+          return row ? { ...row } : null;
+        }),
+        upsert: vi.fn(
+          async ({
+            where,
+            create,
+            update,
+          }: {
+            where: { userId: string };
+            create: Record<string, unknown>;
+            update: Record<string, unknown>;
+          }) => {
+            const existing = settingsRows.get(where.userId);
+            if (existing) {
+              const updated = { ...existing, ...update, updatedAt: new Date() };
+              settingsRows.set(where.userId, updated);
+              return { ...updated };
+            }
+            const now = new Date();
+            const row = {
+              id: nextId("settings"),
+              userId: where.userId,
+              features: "{}",
+              shortcuts: "{}",
+              sttLanguage: "pt-BR",
+              ...create,
+              updatedAt: now,
+            };
+            settingsRows.set(where.userId, row);
+            return { ...row };
+          },
+        ),
+      },
       $disconnect: vi.fn(async () => {}),
     },
   };
@@ -282,7 +359,7 @@ const providerConfigs = new Map<string, {
   translate: (credential: InjectedCredential, text: string, targetLanguage: string) => Promise<string>;
 }>();
 
-const { mockGenerateSummary, configureProvider } = vi.hoisted(() => ({
+const { mockGenerateSummary, mockRollSummary, configureProvider } = vi.hoisted(() => ({
   mockGenerateSummary: vi.fn(
     async (
       _segments: TranscriptContextSegment[],
@@ -295,6 +372,7 @@ const { mockGenerateSummary, configureProvider } = vi.hoisted(() => ({
       return { text, actionItems };
     },
   ),
+  mockRollSummary: vi.fn(async () => "fake"),
   /** Per-kind provider config. Set in beforeEach for handler tests. */
   configureProvider: (
     kind: string,
@@ -315,6 +393,7 @@ const { mockGenerateSummary, configureProvider } = vi.hoisted(() => ({
 vi.mock("./agent/summary.js", () => {
   return {
     generateSummary: mockGenerateSummary,
+    rollSummary: mockRollSummary,
   };
 });
 
@@ -343,11 +422,16 @@ vi.mock("./providers/registry.js", () => ({
 
 import {
   createAssistant,
+  deleteAssistant,
+  listAssistants,
   startSession,
   appendTranscript,
   endSession,
+  rollSessionSummary,
   validateCredential,
   translate,
+  getSettings,
+  saveSettings,
 } from "./handlers.js";
 import type {
   CreateAssistantRequest,
@@ -355,6 +439,7 @@ import type {
   StartSessionRequest,
   AppendTranscriptRequest,
   EndSessionRequest,
+  RollSummaryRequest,
   IpcResult,
   StartSessionResponse,
   EndSessionResponse,
@@ -1653,5 +1738,380 @@ describe("translate (T-207)", () => {
       expect(serialized).not.toContain(SENTINEL_SECRET);
       expect(serialized).not.toContain("NEVER-LEAK");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// rollSessionSummary — resumo rolante (contexto completo do copiloto)
+// ---------------------------------------------------------------------------
+
+const ROLL_CREDENTIAL = {
+  kind: "OPENAI" as const,
+  connectionMode: "API_KEY" as const,
+  secret: "sk-roll-secret-do-not-leak-77777",
+};
+
+async function seedRollSession(segmentCount: number): Promise<string> {
+  const started: IpcResult<StartSessionResponse> = await startSession({
+    userId: "user-1",
+  });
+  if (!started.ok) throw new Error("startSession failed in test setup");
+  const sessionId = started.value.sessionId;
+
+  for (let i = 0; i < segmentCount; i += 1) {
+    const req: AppendTranscriptRequest = {
+      sessionId,
+      speaker: i % 2 === 0 ? "SELF" : "OTHERS",
+      text: `segment ${i}`,
+      startMs: i * 1_000,
+      endMs: i * 1_000 + 900,
+    };
+    const r = await appendTranscript(req);
+    if (!r.ok) throw new Error("appendTranscript failed in test setup");
+  }
+  return sessionId;
+}
+
+function makeRollRequest(sessionId: string): RollSummaryRequest {
+  return { sessionId, credential: ROLL_CREDENTIAL };
+}
+
+describe("rollSessionSummary (resumo rolante)", () => {
+  beforeEach(() => {
+    resetStore();
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("no-ops (updated:false) when the un-summarized volume is below the batch threshold", async () => {
+    const sessionId = await seedRollSession(20); // 20 - 16 (cauda) = 4 < 8
+
+    const result = await rollSessionSummary(makeRollRequest(sessionId));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.updated).toBe(false);
+    expect(result.value.summary).toBeUndefined();
+  });
+
+  it("rolls the segments that left the verbatim window and persists summary + marker", async () => {
+    const sessionId = await seedRollSession(40); // 40 - 16 = 24 >= 8
+
+    const result = await rollSessionSummary(makeRollRequest(sessionId));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.updated).toBe(true);
+    expect(result.value.summary).toBe("fake");
+    expect(result.value.summarizedSegmentCount).toBe(24);
+
+    // Persistido na sessão: resumo + marca de corte.
+    const session = sessions.get(sessionId)!;
+    expect(session.rollingSummary).toBe("fake");
+    expect(session.summarizedSegmentCount).toBe(24);
+  });
+
+  it("is a no-op again right after a successful roll (nothing new beyond the tail)", async () => {
+    const sessionId = await seedRollSession(40);
+    await rollSessionSummary(makeRollRequest(sessionId));
+
+    const second = await rollSessionSummary(makeRollRequest(sessionId));
+
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.value.updated).toBe(false);
+  });
+
+  it("resumes from the persisted marker when rolling a second batch", async () => {
+    const sessionId = await seedRollSession(40);
+    await rollSessionSummary(makeRollRequest(sessionId)); // cobre 24
+
+    // + 16 segmentos novos: 56 - 24 (cobertos) - 16 (cauda) = 16 >= 8.
+    for (let i = 40; i < 56; i += 1) {
+      await appendTranscript({
+        sessionId,
+        speaker: i % 2 === 0 ? "SELF" : "OTHERS",
+        text: `segment ${i}`,
+        startMs: i * 1_000,
+        endMs: i * 1_000 + 900,
+      });
+    }
+    const result = await rollSessionSummary(makeRollRequest(sessionId));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.updated).toBe(true);
+    expect(result.value.summarizedSegmentCount).toBe(40);
+  });
+
+  it("returns ok:false for an unknown session", async () => {
+    const result = await rollSessionSummary(makeRollRequest("session_missing"));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("DB_ERROR");
+  });
+
+  it("credential secret never appears in the result (ADR-003)", async () => {
+    const sessionId = await seedRollSession(40);
+
+    const result = await rollSessionSummary(makeRollRequest(sessionId));
+
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("sk-roll-secret-do-not-leak-77777");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Settings (RF-600/RF-700 + sttLanguage): GET/PUT /settings
+// ---------------------------------------------------------------------------
+
+describe("settings handlers (sttLanguage)", () => {
+  beforeEach(resetStore);
+
+  it("getSettings devolve o default pt-BR quando não há linha persistida", async () => {
+    const result = await getSettings();
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.sttLanguage).toBe("pt-BR");
+    expect(result.value.features).toBeDefined();
+    expect(result.value.shortcuts).toBeDefined();
+  });
+
+  it("saveSettings persiste o sttLanguage e a leitura devolve o valor salvo", async () => {
+    const saved = await saveSettings({ sttLanguage: "en-US" });
+    expect(saved.ok).toBe(true);
+    if (!saved.ok) return;
+    expect(saved.value.sttLanguage).toBe("en-US");
+
+    const read = await getSettings();
+    expect(read.ok).toBe(true);
+    if (!read.ok) return;
+    expect(read.value.sttLanguage).toBe("en-US");
+  });
+
+  it("saveSettings rejeita locale fora do contrato (escrita estrita)", async () => {
+    const result = await saveSettings({ sttLanguage: "es-ES" });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("BAD_REQUEST");
+  });
+
+  it("linha legada sem a coluna (undefined) cai no default na leitura", async () => {
+    // Simula banco migrado parcialmente: linha existe, campo ausente.
+    settingsRows.set("local", {
+      id: "settings_test",
+      userId: "local",
+      features: "{}",
+      shortcuts: "{}",
+      sttLanguage: undefined,
+    });
+
+    const result = await getSettings();
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.sttLanguage).toBe("pt-BR");
+  });
+
+  it("saveSettings preserva features/shortcuts já persistidos (update parcial)", async () => {
+    await saveSettings({ features: { autoScroll: false } });
+    const result = await saveSettings({ sttLanguage: "pt-BR" });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.features.autoScroll).toBe(false);
+    expect(result.value.sttLanguage).toBe("pt-BR");
+  });
+});
+
+// Overlay customizado (template HTML+CSS do usuário): GET tolerante,
+// PUT estrito, update parcial preservando os demais campos.
+describe("settings handlers (overlay customizado)", () => {
+  beforeEach(resetStore);
+
+  it("getSettings devolve defaults (desligado, template vazio) sem linha persistida", async () => {
+    const result = await getSettings();
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.overlayTemplateEnabled).toBe(false);
+    expect(result.value.overlayTemplate).toBe("");
+  });
+
+  it("linha legada sem as colunas (undefined) cai nos defaults na leitura", async () => {
+    // Simula banco migrado parcialmente: linha existe, colunas novas ausentes.
+    settingsRows.set("local", {
+      id: "settings_test",
+      userId: "local",
+      features: "{}",
+      shortcuts: "{}",
+      sttLanguage: "pt-BR",
+      overlayTemplateEnabled: undefined,
+      overlayTemplate: undefined,
+    });
+
+    const result = await getSettings();
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.overlayTemplateEnabled).toBe(false);
+    expect(result.value.overlayTemplate).toBe("");
+  });
+
+  it("valor inválido persistido na coluna cai no default na leitura (tolerância)", async () => {
+    settingsRows.set("local", {
+      id: "settings_test",
+      userId: "local",
+      features: "{}",
+      shortcuts: "{}",
+      sttLanguage: "pt-BR",
+      overlayTemplateEnabled: "sim",
+      overlayTemplate: 42,
+    });
+
+    const result = await getSettings();
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.overlayTemplateEnabled).toBe(false);
+    expect(result.value.overlayTemplate).toBe("");
+  });
+
+  it("saveSettings persiste enabled+template e a leitura devolve o valor salvo", async () => {
+    const template = '<div data-ray-overlay-status="{{status}}">{{bodyHtml}}</div>';
+    const saved = await saveSettings({
+      overlayTemplateEnabled: true,
+      overlayTemplate: template,
+    });
+
+    expect(saved.ok).toBe(true);
+    if (!saved.ok) return;
+    expect(saved.value.overlayTemplateEnabled).toBe(true);
+    expect(saved.value.overlayTemplate).toBe(template);
+
+    const read = await getSettings();
+    expect(read.ok).toBe(true);
+    if (!read.ok) return;
+    expect(read.value.overlayTemplateEnabled).toBe(true);
+    expect(read.value.overlayTemplate).toBe(template);
+  });
+
+  it("saveSettings rejeita template não-string (escrita estrita)", async () => {
+    const result = await saveSettings({ overlayTemplate: 42 });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("BAD_REQUEST");
+  });
+
+  it("saveSettings rejeita template acima do teto do contrato (escrita estrita)", async () => {
+    const result = await saveSettings({
+      overlayTemplate: "x".repeat(200_001),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("BAD_REQUEST");
+  });
+
+  it("saveSettings rejeita overlayTemplateEnabled não-booleano (escrita estrita)", async () => {
+    const result = await saveSettings({ overlayTemplateEnabled: "sim" });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("BAD_REQUEST");
+  });
+
+  it("saveSettings preserva sttLanguage e template já persistidos (update parcial)", async () => {
+    await saveSettings({
+      overlayTemplateEnabled: true,
+      overlayTemplate: "<p>{{bodyHtml}}</p>",
+    });
+    const result = await saveSettings({ sttLanguage: "en-US" });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.sttLanguage).toBe("en-US");
+    expect(result.value.overlayTemplateEnabled).toBe(true);
+    expect(result.value.overlayTemplate).toBe("<p>{{bodyHtml}}</p>");
+  });
+
+  it("template vazio é válido e a leitura o devolve (voltar ao embutido)", async () => {
+    await saveSettings({ overlayTemplate: "" });
+    const result = await getSettings();
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.overlayTemplate).toBe("");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /assistants/:id — exclusão de assistente USER (BUILTIN protegido)
+// ---------------------------------------------------------------------------
+
+describe("deleteAssistant", () => {
+  beforeEach(resetStore);
+
+  /** Semeia direto no store — createAssistant sempre nasce USER. */
+  function seedAssistantRow(source: "USER" | "BUILTIN"): string {
+    const id = nextId("assistant");
+    const now = new Date();
+    assistants.set(id, {
+      id,
+      userId: "local",
+      name: `Assistente ${source}`,
+      category: "GENERAL",
+      source,
+      prompt: "prompt de teste",
+      icon: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    return id;
+  }
+
+  it("remove um assistente USER", async () => {
+    const id = seedAssistantRow("USER");
+
+    const result = await deleteAssistant({ assistantId: id });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.deleted).toBe(true);
+
+    const listed = await listAssistants();
+    expect(listed.ok).toBe(true);
+    if (listed.ok) {
+      expect(listed.value.assistants.some((a) => a.id === id)).toBe(false);
+    }
+  });
+
+  it("recusa BUILTIN (seed do copiloto não é deletável)", async () => {
+    const id = seedAssistantRow("BUILTIN");
+
+    const result = await deleteAssistant({ assistantId: id });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("BAD_REQUEST");
+    // O assistente continua listado.
+    const listed = await listAssistants();
+    if (listed.ok) {
+      expect(listed.value.assistants.some((a) => a.id === id)).toBe(true);
+    }
+  });
+
+  it("NOT_FOUND para id inexistente", async () => {
+    const result = await deleteAssistant({ assistantId: "nao-existe" });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("DB_ERROR");
   });
 });

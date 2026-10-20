@@ -64,7 +64,7 @@ const fakeProvider = new FakeSummaryProvider();
 // Imports — under test
 // ---------------------------------------------------------------------------
 
-import { generateSummary } from "./summary.js";
+import { generateSummary, rollSummary } from "./summary.js";
 import type { SummaryResult } from "./summary.js";
 
 // ---------------------------------------------------------------------------
@@ -190,5 +190,83 @@ describe("generateSummary (T-103)", () => {
     await expect(
       generateSummary(SAMPLE_SEGMENTS, BASE_CREDENTIAL, failingProvider),
     ).rejects.toThrow("Provider unavailable");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// rollSummary — resumo rolante (contexto completo do copiloto, fase 1)
+// ---------------------------------------------------------------------------
+
+// Fake provider que ecoa o conteúdo recebido para validar a montagem do
+// prompt de refine (resumo anterior + lote novo).
+class FakeRollProvider implements AiProvider {
+  readonly kind = "OPENAI" as const;
+  readonly capabilities: ProviderCapabilities = {
+    analysis: true,
+    transcription: false,
+    translation: false,
+  };
+
+  lastParams: AnalyzeParams | undefined;
+
+  async validate(_credential: InjectedCredential) {
+    return { valid: true };
+  }
+
+  async *analyzeStream(params: AnalyzeParams): AsyncIterable<CompletionChunk> {
+    this.lastParams = params;
+    yield { text: "RESUMO-ATUALIZADO[" };
+    yield { text: "decisao: migrar banco" };
+    yield { text: "]" };
+  }
+
+  async translate(
+    _credential: InjectedCredential,
+    _text: string,
+    _targetLanguage: string,
+  ): Promise<string> {
+    throw new Error("not supported");
+  }
+}
+
+describe("rollSummary (resumo rolante)", () => {
+  const rollProvider = new FakeRollProvider();
+
+  beforeEach(() => {
+    rollProvider.lastParams = undefined;
+  });
+
+  it("consolidates chunks into the updated summary text (trimmed)", async () => {
+    const text = await rollSummary(null, SAMPLE_SEGMENTS, BASE_CREDENTIAL, rollProvider);
+
+    expect(text).toBe("RESUMO-ATUALIZADO[decisao: migrar banco]");
+  });
+
+  it("sends the new segments as context and the rolling system prompt", async () => {
+    await rollSummary(null, SAMPLE_SEGMENTS, BASE_CREDENTIAL, rollProvider);
+
+    expect(rollProvider.lastParams).toBeDefined();
+    expect(rollProvider.lastParams!.context).toEqual(SAMPLE_SEGMENTS);
+    expect(rollProvider.lastParams!.system).toContain("rolling summary");
+  });
+
+  it("passes the previous summary via userPrompt for the refine merge", async () => {
+    const previous = "Resumo anterior da reunião.";
+    await rollSummary(previous, SAMPLE_SEGMENTS, BASE_CREDENTIAL, rollProvider);
+
+    expect(rollProvider.lastParams!.userPrompt).toBeDefined();
+    expect(rollProvider.lastParams!.userPrompt).toContain(previous);
+  });
+
+  it("first roll (no previous summary) has no userPrompt", async () => {
+    await rollSummary(null, SAMPLE_SEGMENTS, BASE_CREDENTIAL, rollProvider);
+
+    expect(rollProvider.lastParams!.userPrompt).toBeUndefined();
+  });
+
+  it("credential secret never appears in the result (ADR-003)", async () => {
+    const text = await rollSummary("Resumo.", SAMPLE_SEGMENTS, BASE_CREDENTIAL, rollProvider);
+
+    expect(text).not.toContain("sk-super-secret-do-not-leak-summary-12345");
   });
 });

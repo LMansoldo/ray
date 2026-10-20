@@ -9,10 +9,12 @@ import {
   suggestStream,
   analyze,
   createAssistant,
+  deleteAssistant,
   listAssistants,
   startSession,
   appendTranscript,
   endSession,
+  rollSessionSummary,
   translate,
   saveCredential,
   deleteCredential,
@@ -21,6 +23,7 @@ import {
   saveSettings,
   listSessions,
   getSessionDetail,
+  getSessionReport,
 } from "./handlers.js";
 import type { HealthResponse } from "./contract.js";
 import { initDb, seedDefaults } from "./boot.js";
@@ -70,6 +73,13 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return sendJson(res, 200, result);
   }
 
+  // DELETE /assistants/:id — remove assistente USER (BUILTIN recusado)
+  const assistantMatch = url.match(/^\/assistants\/([^/]+)$/);
+  if (method === "DELETE" && assistantMatch) {
+    const result = await deleteAssistant({ assistantId: assistantMatch[1] });
+    return sendJson(res, 200, result);
+  }
+
   // GET /sessions — últimas sessões (RF-802)
   if (method === "GET" && url === "/sessions") {
     const result = await listSessions();
@@ -80,6 +90,17 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const sessionMatch = url.match(/^\/sessions\/([^/]+)$/);
   if (method === "GET" && sessionMatch) {
     const result = await getSessionDetail({ sessionId: sessionMatch[1] });
+    return sendJson(res, 200, result);
+  }
+
+  // GET /sessions/:id/report?format=md|html — relatório exportável (T-604)
+  const reportMatch = url.match(/^\/sessions\/([^/]+)\/report(\?.*)?$/);
+  if (method === "GET" && reportMatch) {
+    const query = new URLSearchParams(reportMatch[2] ?? "");
+    const result = await getSessionReport({
+      sessionId: reportMatch[1],
+      format: query.get("format") ?? undefined,
+    });
     return sendJson(res, 200, result);
   }
 
@@ -119,6 +140,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     "POST /sessions/start": startSession,
     "POST /sessions/transcript": appendTranscript,
     "POST /sessions/end": endSession,
+    "POST /sessions/summary/roll": rollSessionSummary,
     "POST /translate": translate,
     "POST /credentials": saveCredential,
     "DELETE /credentials": deleteCredential,

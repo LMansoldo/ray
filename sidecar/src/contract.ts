@@ -109,6 +109,19 @@ export type EndSessionRequest = {
 };
 export type EndSessionResponse = { sessionId: string; summaryId?: string };
 
+// Espelho de RollSummaryRequest/RollSummaryResponse (contracts/ipc.ts).
+// Dispara a atualização do resumo rolante da sessão; `updated: false`
+// cobre os no-ops (volume abaixo do lote mínimo ou já em andamento).
+export type RollSummaryRequest = {
+  sessionId: string;
+  credential: InjectedCredential;
+};
+export type RollSummaryResponse = {
+  updated: boolean;
+  summary?: string;
+  summarizedSegmentCount?: number;
+};
+
 export type TranslateRequest = {
   sessionId: string;
   text: string;

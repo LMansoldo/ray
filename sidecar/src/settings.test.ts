@@ -5,6 +5,10 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_FEATURE_TOGGLES,
   DEFAULT_SHORTCUTS,
+  DEFAULT_STT_LANGUAGE,
+  isOverlayTemplate,
+  isSttLanguage,
+  OVERLAY_TEMPLATE_MAX_LENGTH,
   parseFeatureToggles,
   parseShortcutMap,
 } from "./settings.js";
@@ -121,5 +125,47 @@ describe("parseShortcutMap", () => {
     });
 
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("isSttLanguage (idioma da captação)", () => {
+  it("aceita os locales do contrato", () => {
+    expect(isSttLanguage("pt-BR")).toBe(true);
+    expect(isSttLanguage("en-US")).toBe(true);
+  });
+
+  it("rejeita valor fora do contrato", () => {
+    expect(isSttLanguage("es-ES")).toBe(false);
+    expect(isSttLanguage("pt")).toBe(false);
+    expect(isSttLanguage(42)).toBe(false);
+    expect(isSttLanguage(undefined)).toBe(false);
+    expect(isSttLanguage(null)).toBe(false);
+  });
+
+  it("o default do contrato é pt-BR", () => {
+    expect(DEFAULT_STT_LANGUAGE).toBe("pt-BR");
+  });
+});
+
+describe("isOverlayTemplate (template de overlay customizado)", () => {
+  it("aceita string qualquer, inclusive vazia (vazio = InsightCard embutido)", () => {
+    expect(isOverlayTemplate("")).toBe(true);
+    expect(isOverlayTemplate("<div>{{bodyHtml}}</div>")).toBe(true);
+    expect(isOverlayTemplate("x".repeat(OVERLAY_TEMPLATE_MAX_LENGTH))).toBe(
+      true,
+    );
+  });
+
+  it("rejeita não-string e estouro do teto do contrato (escrita estrita)", () => {
+    expect(isOverlayTemplate(42)).toBe(false);
+    expect(isOverlayTemplate(undefined)).toBe(false);
+    expect(isOverlayTemplate(null)).toBe(false);
+    expect(
+      isOverlayTemplate("x".repeat(OVERLAY_TEMPLATE_MAX_LENGTH + 1)),
+    ).toBe(false);
+  });
+
+  it("o teto do contrato é 200_000 caracteres", () => {
+    expect(OVERLAY_TEMPLATE_MAX_LENGTH).toBe(200_000);
   });
 });

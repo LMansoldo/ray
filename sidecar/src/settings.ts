@@ -36,6 +36,43 @@ export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
 };
 
 // ---------------------------------------------------------------------
+// Idioma da captação de fala (STT)
+// ---------------------------------------------------------------------
+
+// Espelho de contracts/settings.ts: locale explícito do motor de STT
+// (SFSpeechRecognizer) — sem isso o recognizer herda o locale do
+// dispositivo e pt-BR não é transcrito num macOS em inglês.
+
+export const STT_LANGUAGE_IDS = ["pt-BR", "en-US"] as const;
+
+export type SttLanguage = (typeof STT_LANGUAGE_IDS)[number];
+
+export const DEFAULT_STT_LANGUAGE: SttLanguage = "pt-BR";
+
+export function isSttLanguage(value: unknown): value is SttLanguage {
+  return (
+    typeof value === "string" &&
+    (STT_LANGUAGE_IDS as readonly string[]).includes(value)
+  );
+}
+
+// ---------------------------------------------------------------------
+// Overlay customizado (template HTML+CSS)
+// ---------------------------------------------------------------------
+
+// Espelho de contracts/settings.ts: teto de tamanho do template de overlay —
+// PUT /settings recusa payloads desproporcionais (escrita estrita).
+export const OVERLAY_TEMPLATE_MAX_LENGTH = 200_000;
+
+// Espelho de contracts/settings.ts: template é uma string (vazia = usar o
+// InsightCard embutido) com no máximo OVERLAY_TEMPLATE_MAX_LENGTH caracteres.
+export function isOverlayTemplate(value: unknown): value is string {
+  return (
+    typeof value === "string" && value.length <= OVERLAY_TEMPLATE_MAX_LENGTH
+  );
+}
+
+// ---------------------------------------------------------------------
 // Atalhos de teclado (RF-600)
 // ---------------------------------------------------------------------
 
