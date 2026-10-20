@@ -272,6 +272,61 @@ As tasks estão agrupadas em fases por dependência. Dentro de uma fase, as task
 
 ---
 
+## FASE 6 — Fact-checking e robustez operacional (inspirado em alandaitch/live-fact-checker)
+
+> Onda 1 em paralelo: T-600, T-601, T-602, T-604, T-605 (arquivos disjuntos).
+> Onda 2: T-603, que depende de T-600 e T-601 (mesmos arquivos: `websearch.ts`, `graph.ts`).
+
+### Convenção markdown de veredito (v1) — T-600 produz, T-602 renderiza
+
+```md
+### Claim: "<afirmação textual, normalizada>"
+**Veredito: TRUE|FALSE|UNCERTAIN** · confiança: alta|média|baixa
+<1–2 frases de justificativa, citando o que a contraprova/confirmação mostrou>
+Fontes: [título](url) · [título](url)
+```
+
+Detecção na UI: heading `### Claim:` abre o bloco; a linha `**Veredito: (TRUE|FALSE|UNCERTAIN)**` define a cor do chip (TRUE verde, FALSE vermelho, UNCERTAIN âmbar); `confiança: (alta|média|baixa)` define o indicador; a linha `Fontes:` vira lista de links destacada. Bloco sem veredito é renderizado como markdown normal.
+
+### T-600 · Pipeline de fact-checking: extração e verificação de claims
+**Objetivo:** nó do agente que extrai afirmações verificáveis do delta de transcrição e verifica cada uma contra a web, anexando uma seção "## Verificação de fatos" ao system prompt (mesmo molde de `withMeetingSummary`/`withSearchResults`).
+**Toca:** `sidecar/src/agent/tools/claims.ts` (novo), `sidecar/src/agent/tools/claims.test.ts` (novo), `sidecar/src/agent/graph.ts` (apenas chamada aditiva em `buildSystemPrompt`).
+**Contrato:** provider-agnostic (interface `AiProvider`); reusa `searchDuckDuckGo`/`SearchResult` de `websearch.ts` SEM alterar esse arquivo; não altera `contract.ts`/`contracts/ipc.ts`; vereditos seguem a convenção markdown acima; segredo da credencial só vive na chamada (ADR-003).
+**Escopo:** triggers `ANALYZE_CONVERSATION` e `ANALYZE_SELECTION` (const `CLAIMS_TRIGGERS` espelhando `SEARCH_TRIGGERS`); AUTO fora por padrão. Máx. 2 claims por ciclo, verificação sequencial; extração = 1 chamada LLM com prompt próprio em `claims.ts`; timeout por busca; qualquer falha → seção omitida (best-effort, nunca derruba a sugestão).
+**Pronto quando:** com provider fake e busca mockada, o system prompt final contém a seção com veredito e fontes; sem claims verificáveis → prompt inalterado; `tsc --noEmit` e `vitest run` do sidecar passam.
+
+### T-601 · Rate limiter de janela deslizante
+**Objetivo:** limitador por escopo (`"search"`, `"llm:<kind>"`) com `acquireSlot()` que espera só o tempo necessário (janela deslizante de timestamps); integrado ao DDG em `websearch.ts`; exportado para uso futuro pelos adapters.
+**Toca:** `sidecar/src/agent/ratelimit.ts` (novo), `sidecar/src/agent/ratelimit.test.ts` (novo), `sidecar/src/agent/tools/websearch.ts` (integração interna), `sidecar/src/agent/tools/websearch.test.ts` (ajustes).
+**Contrato:** exports públicos de `websearch.ts` preservados (`searchDuckDuckGo`, `SearchResult`, `webSearchForRequest`, `shouldWebSearch`, `deriveSearchQuery`, `withSearchResults`, `parseDuckDuckGoHtml`, `SearchOptions`) — T-600 consome em paralelo. Default sugerido: 10 req/min para `"search"`. Zero dependências novas.
+**Pronto quando:** testes com fake timers provam que a N-ésima chamada dentro da janela espera o mínimo necessário e que a janela expirando libera; `tsc --noEmit` e `vitest run` do sidecar passam.
+
+### T-602 · Veredito visual no MarkdownView/InsightCard
+**Objetivo:** transform de markdown (molde de `mermaid.ts`) que detecta blocos da convenção de veredito e renderiza chip colorido (TRUE verde, FALSE vermelho, UNCERTAIN âmbar), indicador de confiança e fontes destacadas.
+**Toca:** `apps/ui/src/lib/markdown/verdict.ts` (novo), `apps/ui/src/lib/markdown/verdict.test.ts` (novo), `apps/ui/src/lib/markdown/MarkdownView.svelte` (integrar transform), `apps/ui/src/surfaces/overlay/InsightCard.svelte` (só se estilos extras forem precisos).
+**Contrato:** regex da convenção exata (seção acima); sem dependências novas; cores via tokens do design system Liquid Glass.
+**Pronto quando:** markdown com as 3 classes de veredito renderiza com cores distintas; markdown sem o padrão fica intocado (teste); `npm run check` e `vitest run` da UI passam.
+
+### T-603 · Camada de busca: interface SearchProvider + provedor com chave + cache — **ONDA 2 (após T-600 e T-601)**
+**Objetivo:** extrair interface `SearchProvider` (molde ADR-006): DuckDuckGo refatorado para implementá-la (default zero-key); +1 provedor com chave (Tavily ou Brave, chave via env `RAY_SEARCH_*`); cache/dedupe por query com TTL curto (Map em memória); `webSearchForRequest` reescrito sobre o registry, envolvendo chamadas com o rate limiter do T-601.
+**Toca:** `sidecar/src/agent/tools/search/` (novo: `provider.ts`, `duckduckgo.ts`, provedor com chave, `cache.ts`), `sidecar/src/agent/tools/websearch.ts` (vira fachada compatível), testes correspondentes.
+**Contrato:** exports públicos de `websearch.ts` preservados; grounding nativo do Gemini fica fora (follow-up próprio); zero dependências novas.
+**Pronto quando:** busca funciona com DDG; com env key usa o provedor com chave; cache evita repetição dentro do TTL (teste); `tsc --noEmit` e `vitest run` do sidecar passam.
+
+### T-604 · Export de relatório da sessão
+**Objetivo:** gerar e exportar relatório da sessão (resumo + action items + transcrição com timestamps; insights persistidos se houver) em Markdown e HTML.
+**Toca:** `sidecar/src/handlers.ts` ou novo `sidecar/src/handlers/report.ts` + `sidecar/src/agent/report.ts` (montagem), caminho UI/core seguindo o padrão existente de como a Home lê sessões (se precisar de comando novo no core, seguir o fluxo `gen-ipc-contract.sh` do T-000 com diff mínimo), `apps/ui/src/surfaces/home/` (ação Exportar).
+**Contrato:** não alterar assinaturas existentes de `contracts/ipc.ts`/`prisma/schema.prisma`; nenhum conteúdo de reunião em logs.
+**Pronto quando:** sessão com resumo + segmentos gera relatório com as três seções; UI dispara a exportação e entrega o arquivo (download ou pasta escolhida); teste do handler com provider fake; `tsc --noEmit` (sidecar e UI) e `cargo check` passam.
+
+### T-605 · Prompts: regras de epistemia + política de idioma
+**Objetivo:** (a) adicionar aos prompts de rolamento as regras "generalização sem fonte específica fica marcada como incerta" e "procure ativamente contraprovas antes de afirmar"; (b) resolver a inconsistência de idioma: o prompt do copiloto técnico manda "Always respond in English" enquanto o rolamento manda "idioma da transcrição" — padronizar para "responda no idioma predominante da transcrição, mantendo termos técnicos no original" nos dois.
+**Toca:** `docs/assistant-tecnico-ao-vivo.md`, `sidecar/src/agent/summary.ts`, `sidecar/src/agent/summary.test.ts`.
+**Regra de paralelismo:** NÃO editar `sidecar/src/agent/graph.ts` nem `sidecar/src/agent/tools/claims.ts` (T-600 roda em paralelo).
+**Pronto quando:** os pontos de prompt ficam coerentes entre si; testes de summary ajustados passam; `tsc --noEmit` do sidecar passa.
+
+---
+
 ## Grafo de dependências (resumo)
 
 - **Fundação:** T-000, T-001, T-002, T-003 → destravam tudo.
