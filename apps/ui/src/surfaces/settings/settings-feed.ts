@@ -14,9 +14,12 @@ import { getVersion } from '@tauri-apps/api/app'
 import {
   DEFAULT_FEATURE_TOGGLES,
   DEFAULT_SHORTCUTS,
+  DEFAULT_STT_LANGUAGE,
   FEATURE_TOGGLE_NAMES,
+  isOverlayTemplate,
+  isSttLanguage,
 } from '../../../../../contracts/settings'
-import type { FeatureToggles, ShortcutMap } from '../../../../../contracts/settings'
+import type { FeatureToggles, ShortcutMap, SttLanguage } from '../../../../../contracts/settings'
 import type { GetCredentialsResponse } from '../../../../../contracts/ipc'
 import type { OnboardingPermissionId, OnboardingPermissionState } from '../onboarding/types'
 import type { ProviderSlotId, ProviderConnectionStatus, SettingsState } from './types'
@@ -46,6 +49,12 @@ export const RESTRICTIVE_PLACEHOLDER: SettingsState = {
   appVersion: '0.0.0',
   shortcuts: DEFAULT_SHORTCUTS,
   features: { ...DEFAULT_FEATURE_TOGGLES },
+  sttLanguage: DEFAULT_STT_LANGUAGE,
+  // Overlay customizado nasce desligado e sem template (built-in) — o
+  // placeholder é restritivo: nunca exibe um template que não foi confirmado
+  // pelo core.
+  overlayTemplateEnabled: false,
+  overlayTemplate: '',
 }
 
 let activeFeed: SettingsStateFeed = () => RESTRICTIVE_PLACEHOLDER
@@ -172,7 +181,12 @@ export async function loadSettingsState(): Promise<SettingsState> {
 
   // Features persistidas (RF-700) — só chaves booleanas do contrato.
   try {
-    const settings = await invoke<{ features?: unknown }>('get_app_settings')
+    const settings = await invoke<{
+      features?: unknown
+      sttLanguage?: unknown
+      overlayTemplateEnabled?: unknown
+      overlayTemplate?: unknown
+    }>('get_app_settings')
     if (settings && typeof settings === 'object' && settings.features &&
         typeof settings.features === 'object' && !Array.isArray(settings.features)) {
       const persisted = settings.features as Record<string, unknown>
@@ -183,6 +197,20 @@ export async function loadSettingsState(): Promise<SettingsState> {
         }
       }
       state.features = features
+    }
+    // Locale de STT persistido — valor fora do contrato cai no default.
+    if (settings && typeof settings === 'object' && isSttLanguage(settings.sttLanguage)) {
+      state.sttLanguage = settings.sttLanguage
+    }
+    // Overlay customizado — leitura tolerante: flag só assume true com o
+    // boolean do contrato; template fora do contrato cai em '' (built-in).
+    if (settings && typeof settings === 'object') {
+      if (settings.overlayTemplateEnabled === true) {
+        state.overlayTemplateEnabled = true
+      }
+      if (isOverlayTemplate(settings.overlayTemplate)) {
+        state.overlayTemplate = settings.overlayTemplate
+      }
     }
   } catch {
     // sidecar não pronto — mantém a base (defaults do contrato)

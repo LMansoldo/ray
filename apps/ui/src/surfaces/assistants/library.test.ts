@@ -20,13 +20,13 @@ import type { AssistantCategory } from '../../../../../contracts/ipc'
 // da copy pinada é PT (FLAG de i18n RNF-502 — mecanismo indecidido no repo).
 
 const SAMPLE: AssistantView[] = [
-  { id: 'a1', name: 'Generalista', category: 'GENERAL', prompt: 'Você é um assistente geral.' },
-  { id: 'a2', name: 'Reuniões executivas', category: 'MEETINGS', prompt: 'Resuma decisões e ações.' },
-  { id: 'a3', name: 'Resumo de vendas', category: 'SALES', prompt: 'Sugira perguntas para qualificar.' },
-  { id: 'a4', name: 'Tradução ao vivo', category: 'TRANSLATION', prompt: 'Traduza mantendo o tom.' },
-  { id: 'a5', name: 'Preparação de entrevista', category: 'INTERVIEW', prompt: 'Destaque pontos fortes.' },
-  { id: 'a6', name: 'Estudo dirigido', category: 'STUDY', prompt: 'Crie flashcards e resumos.' },
-  { id: 'a7', name: 'Custom de vendas', category: 'CUSTOM', prompt: 'Prompt personalizado.' },
+  { id: 'a1', name: 'Generalista', category: 'GENERAL', prompt: 'Você é um assistente geral.', source: 'USER' },
+  { id: 'a2', name: 'Reuniões executivas', category: 'MEETINGS', prompt: 'Resuma decisões e ações.', source: 'USER' },
+  { id: 'a3', name: 'Resumo de vendas', category: 'SALES', prompt: 'Sugira perguntas para qualificar.', source: 'USER' },
+  { id: 'a4', name: 'Tradução ao vivo', category: 'TRANSLATION', prompt: 'Traduza mantendo o tom.', source: 'USER' },
+  { id: 'a5', name: 'Preparação de entrevista', category: 'INTERVIEW', prompt: 'Destaque pontos fortes.', source: 'USER' },
+  { id: 'a6', name: 'Estudo dirigido', category: 'STUDY', prompt: 'Crie flashcards e resumos.', source: 'USER' },
+  { id: 'a7', name: 'Custom de vendas', category: 'CUSTOM', prompt: 'Prompt personalizado.', source: 'USER' },
 ]
 
 function makeAssistants(count: number): AssistantView[] {
@@ -37,6 +37,7 @@ function makeAssistants(count: number): AssistantView[] {
       name: `Assistente ${number}`,
       category: number % 2 === 0 ? 'MEETINGS' : 'SALES',
       prompt: `Prompt do Assistente ${number}`,
+      source: 'USER',
     }
   })
 }

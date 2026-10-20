@@ -4,16 +4,14 @@
 
 export type AppBarProps = {
   /**
-   * Label da janela Tauri alvo do comando set_stealth.
-   * Navegacao sempre aponta para 'main'; esta prop nao controla o destino.
-   * Padrao 'main' — label da unica janela declarada em core/tauri.conf.json.
-   */
-  windowLabel?: string
-  /**
    * Estado inicial da exclusão de captura (stealth). Não existe comando de
    * LEITURA de estado em core/src/lib.rs: quem monta a barra (App shell)
    * informa o estado real ao montar. Padrão true — o uso completo é o
    * default e o app nasce fora da captura de tela.
+   *
+   * O toggle é GLOBAL: `set_stealth` aplica em todas as janelas
+   * participantes (windows::STEALTH_WINDOWS no core) — não há mais alvo por
+   * janela, então não existe prop de label.
    */
   stealthExcluded?: boolean
 }

@@ -8,20 +8,21 @@
 // Os campos de domínio reusam os tipos do contrato (contracts/settings.ts,
 // contracts/ipc.ts) e do onboarding (T-405, DRY) — nunca são redefinidos aqui.
 import type { AiFunction, ProviderKind } from '../../../../../contracts/ipc'
-import type { FeatureToggles, ShortcutMap } from '../../../../../contracts/settings'
+import type { FeatureToggles, ShortcutMap, SttLanguage } from '../../../../../contracts/settings'
 import type {
   OnboardingPermissionId,
   OnboardingPermissionState,
   OnboardingPlatform,
 } from '../onboarding/types'
 
-/** As 7 abas da superfície Configurações, na ordem do backlog T-406. */
+/** As 8 abas da superfície Configurações (backlog T-406 + Overlay customizado). */
 export type SettingsTabId =
   | 'aiSources'
   | 'models'
   | 'audioScreen'
   | 'permissions'
   | 'features'
+  | 'overlay'
   | 'shortcuts'
   | 'help'
 
@@ -65,4 +66,9 @@ export interface SettingsState {
   shortcuts: ShortcutMap
   /** Toggles de recursos (RF-700) — hidratados de get_app_settings. */
   features: FeatureToggles
+  /** Locale de reconhecimento de fala — hidratado de get_app_settings. */
+  sttLanguage: SttLanguage
+  /** Overlay customizado (template HTML+CSS) — hidratado de get_app_settings. */
+  overlayTemplateEnabled: boolean
+  overlayTemplate: string
 }

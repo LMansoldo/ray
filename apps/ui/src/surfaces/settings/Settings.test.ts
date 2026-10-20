@@ -5,12 +5,13 @@ import { resetSettingsStateFeed } from './settings-feed'
 
 // Contrato T-406: Settings.svelte é a raiz da superfície Configurações, sem
 // props (evita o problema ComponentProps<SvelteComponent> → never do T-402 —
-// ver decisions.md). Contrato de DOM por data-attrs: 7 abas na ordem do
-// backlog T-406, exatamente UM painel ativo por vez.
+// ver decisions.md). Contrato de DOM por data-attrs: 8 abas na ordem do
+// backlog T-406 (+ Overlay customizado), exatamente UM painel ativo por vez.
 //
-// As 7 abas (SRS seções 3–4): Fontes de IA (RF-401/402/403/406), Modelos
+// As abas (SRS seções 3–4): Fontes de IA (RF-401/402/403/406), Modelos
 // (RF-301/302/303/404), Áudio e Tela (RF-206), Permissões (RF-103/104/335),
-// Recursos (RF-700), Atalhos (RF-601/602/604), Ajuda (RF-1001..1004).
+// Recursos (RF-700), Overlay (template customizado), Atalhos (RF-601/602/604),
+// Ajuda (RF-1001..1004).
 
 vi.mock('@tauri-apps/api/event', () => ({
   emit: vi.fn().mockResolvedValue(undefined),
@@ -24,6 +25,7 @@ const TAB_TITLES: Array<[string, string]> = [
   ['audioScreen', 'Áudio e Tela'],
   ['permissions', 'Permissões'],
   ['features', 'Recursos'],
+  ['overlay', 'Overlay'],
   ['shortcuts', 'Atalhos'],
   ['help', 'Ajuda'],
 ]
@@ -48,7 +50,7 @@ afterEach(() => {
 })
 
 describe('Settings — estrutura de abas (backlog T-406)', () => {
-  it('renderiza as 7 abas na ordem do contrato', () => {
+  it('renderiza as 8 abas na ordem do contrato', () => {
     const { container } = render(Settings)
 
     const tabs = Array.from(container.querySelectorAll('[data-settings-tab]'))

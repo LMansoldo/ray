@@ -288,3 +288,84 @@ describe('OverlayWindow — janela flutuante do assistente (RF-012)', () => {
     expect(EMOJI_PATTERN.test(container.textContent ?? '')).toBe(false)
   })
 })
+
+describe('OverlayWindow — template customizado (get_app_settings + ray:overlay-template-changed)', () => {
+  const CUSTOM_TEMPLATE = '<div data-ray-overlay-status="{{status}}"><div data-ray-body>{{bodyHtml}}</div></div>'
+
+  it('hidrata o template de get_app_settings no mount e o usa no card', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_app_settings') {
+        return { overlayTemplateEnabled: true, overlayTemplate: CUSTOM_TEMPLATE }
+      }
+      return undefined
+    })
+    const { container } = render(OverlayWindow)
+
+    await waitFor(() => expect(hasInvoke('get_app_settings')).toBe(true))
+    await emit('suggest-stream', { type: 'start', suggestionId: 's-1' })
+    await emit('suggest-stream', { type: 'token', text: 'Olá' })
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-custom-overlay-card]')).not.toBeNull()
+    })
+    expect(container.querySelector('[data-insight-card]'), 'built-in sai de cena').toBeNull()
+  })
+
+  it('settings desligando o template (enabled false / vazio) mantém o built-in', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_app_settings') {
+        return { overlayTemplateEnabled: true, overlayTemplate: '' }
+      }
+      return undefined
+    })
+    const { container } = render(OverlayWindow)
+
+    await waitFor(() => expect(hasInvoke('get_app_settings')).toBe(true))
+    await emit('suggest-stream', { type: 'start', suggestionId: 's-1' })
+    await emit('suggest-stream', { type: 'token', text: 'Olá' })
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-insight-card]')).not.toBeNull()
+    })
+    expect(container.querySelector('[data-custom-overlay-card]')).toBeNull()
+  })
+
+  it('get_app_settings falhando é tolerado — built-in segue (InsightCard)', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_app_settings') throw new Error('sidecar not started')
+      return undefined
+    })
+    const { container } = render(OverlayWindow)
+
+    await emit('suggest-stream', { type: 'start', suggestionId: 's-1' })
+    await emit('suggest-stream', { type: 'token', text: 'Olá' })
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-insight-card]')).not.toBeNull()
+    })
+    expect(container.querySelector('[data-custom-overlay-card]')).toBeNull()
+  })
+
+  it('ray:overlay-template-changed troca o card AO VIVO (salvou nas Configurações)', async () => {
+    const { container } = render(OverlayWindow)
+
+    await emit('suggest-stream', { type: 'start', suggestionId: 's-1' })
+    await emit('suggest-stream', { type: 'token', text: 'Olá' })
+    await waitFor(() => {
+      expect(container.querySelector('[data-insight-card]')).not.toBeNull()
+    })
+
+    await emit('ray:overlay-template-changed', { enabled: true, template: CUSTOM_TEMPLATE })
+    await waitFor(() => {
+      expect(container.querySelector('[data-custom-overlay-card]')).not.toBeNull()
+    })
+    expect(container.querySelector('[data-insight-card]')).toBeNull()
+
+    // Desligar volta ao built-in sem reinício.
+    await emit('ray:overlay-template-changed', { enabled: false, template: CUSTOM_TEMPLATE })
+    await waitFor(() => {
+      expect(container.querySelector('[data-insight-card]')).not.toBeNull()
+    })
+    expect(container.querySelector('[data-custom-overlay-card]')).toBeNull()
+  })
+})

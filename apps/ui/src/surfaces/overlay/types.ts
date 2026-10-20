@@ -16,6 +16,12 @@ export interface OverlayProps {
   hint?: string
   /** RF-701: acompanhar a resposta mais recente (toggle Recursos). */
   autoScroll?: boolean
+  /**
+   * Template HTML+CSS do overlay customizado. null = built-in (InsightCard).
+   * Resolvido pelo OverlayWindow a partir de get_app_settings e mantido ao
+   * vivo via ray:overlay-template-changed.
+   */
+  customTemplate?: string | null
 }
 
 /** O card recebe o estado derivado do stream; 'idle' nunca chega a ele. */
@@ -23,4 +29,14 @@ export interface InsightCardProps {
   state: SuggestionStreamState
   /** RF-701: seguir o fim do conteúdo enquanto renderiza. */
   autoScroll?: boolean
+}
+
+/**
+ * Card de overlay com template HTML+CSS do usuário (sem JS). O template chega
+ * já resolvido (overlay-template.ts); o `state` é o mesmo SuggestionStreamState
+ * do InsightCard — a troca de card é transparente para o stream.
+ */
+export interface CustomOverlayCardProps extends InsightCardProps {
+  /** Template HTML+CSS com placeholders {{var}}. String não vazia. */
+  template: string
 }

@@ -32,7 +32,7 @@ describe('assistants-feed — injeção e leitura', () => {
 
   it('a leitura reavalia o feed a cada chamada (sem cache)', () => {
     const state: AssistantsState = {
-      assistants: [{ id: 'a1', name: 'Generalista', category: 'GENERAL', prompt: 'Prompt.' }],
+      assistants: [{ id: 'a1', name: 'Generalista', category: 'GENERAL', prompt: 'Prompt.', source: 'USER' }],
       activeAssistantId: 'a1',
     }
 
@@ -48,8 +48,8 @@ describe('assistants-feed — injeção e leitura', () => {
   it('o feed injetado entrega a lista completa com o ativo', () => {
     const state: AssistantsState = {
       assistants: [
-        { id: 'a1', name: 'Generalista', category: 'GENERAL', prompt: 'Você é geral.' },
-        { id: 'a2', name: 'Resumo de vendas', category: 'SALES', prompt: 'Qualifique.' },
+        { id: 'a1', name: 'Generalista', category: 'GENERAL', prompt: 'Você é geral.', source: 'USER' },
+        { id: 'a2', name: 'Resumo de vendas', category: 'SALES', prompt: 'Qualifique.', source: 'USER' },
       ],
       activeAssistantId: 'a2',
     }
@@ -63,7 +63,7 @@ describe('assistants-feed — injeção e leitura', () => {
 
   it('resetAssistantsStateFeed() volta ao placeholder restritivo', () => {
     setAssistantsStateFeed(() => ({
-      assistants: [{ id: 'a1', name: 'Generalista', category: 'GENERAL', prompt: 'Prompt.' }],
+      assistants: [{ id: 'a1', name: 'Generalista', category: 'GENERAL', prompt: 'Prompt.', source: 'USER' }],
       activeAssistantId: 'a1',
     }))
     expect(readAssistantsState().assistants).toHaveLength(1)

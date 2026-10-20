@@ -10,10 +10,12 @@ import type { SettingsAction } from './settings-actions'
 // fronteira declarada (settings-actions) E emite 'ray:meters-changed'
 // {visible} para o consumidor global.
 
-const { emitMock } = vi.hoisted(() => ({
+const { invokeMock, emitMock } = vi.hoisted(() => ({
+  invokeMock: vi.fn<(command: string, args?: unknown) => Promise<unknown>>().mockResolvedValue(undefined),
   emitMock: vi.fn<(event: string, payload?: unknown) => Promise<void>>().mockResolvedValue(undefined),
 }))
 
+vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }))
 vi.mock('@tauri-apps/api/event', () => ({
   emit: emitMock,
   listen: vi.fn().mockResolvedValue(() => {}),
@@ -58,6 +60,7 @@ function metersToggle(container: HTMLElement): HTMLInputElement {
 afterEach(() => {
   cleanup()
   emitMock.mockClear()
+  invokeMock.mockClear()
   window.localStorage.removeItem('ray_audio_meters')
   window.localStorage.removeItem('ray_models')
 })
@@ -112,5 +115,71 @@ describe('Áudio e Tela — opção de ocultar medidores (RF-206)', () => {
 
     expect(window.localStorage.getItem('ray_audio_meters')).toBe('1')
     expect(emitMock).toHaveBeenCalledWith('ray:meters-changed', { visible: true })
+  })
+})
+
+// Idioma da captação (STT) — locale EXPLÍCITO do SFSpeechRecognizer. Sem ele
+// o recognizer herda o locale do dispositivo e pt-BR não é transcrito num
+// macOS em inglês. Persistência via save_stt_language (o core espelha no
+// motor e descarta os engines vivos — efeito imediato).
+
+function sttLanguageSelect(container: HTMLElement): HTMLSelectElement {
+  const select = container.querySelector('[data-stt-language]') as HTMLSelectElement | null
+  if (!select) {
+    throw new Error('seletor de idioma da captação não encontrado')
+  }
+  return select
+}
+
+describe('Áudio e Tela — idioma da captação (sttLanguage)', () => {
+  it('renderiza o seletor com pt-BR selecionado por padrão', async () => {
+    const { container } = render(Settings)
+    await openTab(container, 'audioScreen')
+
+    const select = sttLanguageSelect(container)
+    expect(select.value).toBe('pt-BR')
+    const options = Array.from(select.options).map((o) => o.value)
+    expect(options).toEqual(['pt-BR', 'en-US'])
+  })
+
+  it('mudar para en-US despacha sttLanguageChange e persiste via save_stt_language', async () => {
+    const actions: SettingsAction[] = []
+    const unsubscribe = onSettingsAction((action: SettingsAction) => actions.push(action))
+    const { container } = render(Settings)
+    await openTab(container, 'audioScreen')
+    await waitFor(() => {
+      expect(sttLanguageSelect(container).value).toBe('pt-BR')
+    })
+
+    await fireEvent.change(sttLanguageSelect(container), { target: { value: 'en-US' } })
+
+    expect(actions).toEqual([{ type: 'sttLanguageChange', language: 'en-US' }])
+    expect(invokeMock).toHaveBeenCalledWith('save_stt_language', { language: 'en-US' })
+    expect(sttLanguageSelect(container).value).toBe('en-US')
+    unsubscribe()
+  })
+
+  it('falha de persistência reverte a escolha (o select nunca mente)', async () => {
+    // Rejeita POR COMANDO: mockRejectedValueOnce seria consumido pelo
+    // get_app_settings da hidratação do mount, não pelo save do idioma.
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'save_stt_language') {
+        throw new Error('sidecar não iniciado')
+      }
+      return undefined
+    })
+    const { container } = render(Settings)
+    await openTab(container, 'audioScreen')
+    await waitFor(() => {
+      expect(sttLanguageSelect(container).value).toBe('pt-BR')
+    })
+
+    // A rejeição resolve numa microtask: o valor otimista não é observável
+    // entre awaits (caminho otimista coberto no teste anterior) — verifica
+    // só a reversão ao valor anterior.
+    await fireEvent.change(sttLanguageSelect(container), { target: { value: 'en-US' } })
+    await waitFor(() => {
+      expect(sttLanguageSelect(container).value).toBe('pt-BR')
+    })
   })
 })

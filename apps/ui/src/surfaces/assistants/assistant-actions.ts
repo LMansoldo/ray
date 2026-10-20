@@ -20,6 +20,7 @@ import type { AssistantCategory } from '../../../../../contracts/ipc'
 export type AssistantAction =
   | { type: 'assistantSelect'; assistantId: string }
   | { type: 'assistantCreate'; name: string; category: AssistantCategory; prompt: string }
+  | { type: 'assistantDelete'; assistantId: string }
   | { type: 'promptImportRequest' }
 
 type AssistantActionListener = (action: AssistantAction) => void

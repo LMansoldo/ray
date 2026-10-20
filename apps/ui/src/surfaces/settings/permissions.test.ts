@@ -3,7 +3,11 @@ import { render, cleanup, fireEvent } from '@testing-library/svelte'
 import Settings from './Settings.svelte'
 import { setSettingsStateFeed, resetSettingsStateFeed } from './settings-feed'
 import type { SettingsState } from './types'
-import { DEFAULT_FEATURE_TOGGLES, DEFAULT_SHORTCUTS } from '../../../../../contracts/settings'
+import {
+  DEFAULT_FEATURE_TOGGLES,
+  DEFAULT_SHORTCUTS,
+  DEFAULT_STT_LANGUAGE,
+} from '../../../../../contracts/settings'
 
 // Contrato T-406 / RF-103, RF-104, RF-335 — aba Permissões: o mesmo
 // mapeamento permissão→função do onboarding (T-405), relido do feed desta
@@ -49,6 +53,9 @@ function baseState(overrides: Partial<SettingsState> = {}): SettingsState {
     appVersion: '0.0.0',
     shortcuts: DEFAULT_SHORTCUTS,
     features: { ...DEFAULT_FEATURE_TOGGLES },
+    sttLanguage: DEFAULT_STT_LANGUAGE,
+    overlayTemplateEnabled: false,
+    overlayTemplate: '',
     ...overrides,
   }
 }

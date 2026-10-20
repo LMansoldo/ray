@@ -11,6 +11,8 @@ export interface AssistantView {
   name: string
   category: AssistantCategory
   prompt: string
+  /** Origem: BUILTIN (seed, não deletável) ou USER (criado, deletável). */
+  source: 'USER' | 'BUILTIN'
 }
 
 /** Estado da biblioteca entregue pelo feed (assistants-feed.ts). */

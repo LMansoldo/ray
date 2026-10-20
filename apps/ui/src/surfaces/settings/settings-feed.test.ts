@@ -7,6 +7,7 @@ import {
 } from './settings-feed'
 import type { SettingsState } from './types'
 import {
+  DEFAULT_STT_LANGUAGE,
   DEFAULT_FEATURE_TOGGLES,
   DEFAULT_SHORTCUTS,
 } from '../../../../../contracts/settings'
@@ -72,6 +73,8 @@ describe('settings-feed — placeholder restritivo (sem comando core)', () => {
 
     expect(state.shortcuts).toEqual(DEFAULT_SHORTCUTS)
     expect(state.features).toEqual(DEFAULT_FEATURE_TOGGLES)
+    expect(state.overlayTemplateEnabled).toBe(false)
+    expect(state.overlayTemplate).toBe('')
   })
 })
 
@@ -103,6 +106,9 @@ describe('settings-feed — injeção e leitura', () => {
       appVersion: '0.0.0',
       shortcuts: DEFAULT_SHORTCUTS,
       features: { ...DEFAULT_FEATURE_TOGGLES },
+      sttLanguage: DEFAULT_STT_LANGUAGE,
+      overlayTemplateEnabled: false,
+      overlayTemplate: '',
     }
 
     setSettingsStateFeed(() => state)
@@ -135,6 +141,9 @@ describe('settings-feed — injeção e leitura', () => {
       appVersion: '2.1.3',
       shortcuts: DEFAULT_SHORTCUTS,
       features: { ...DEFAULT_FEATURE_TOGGLES },
+      sttLanguage: DEFAULT_STT_LANGUAGE,
+      overlayTemplateEnabled: false,
+      overlayTemplate: '',
     }))
     expect(readSettingsState().providerStatus.deepseek).toBe('connected')
 
@@ -294,6 +303,55 @@ describe('settings-feed — hidratação do core (loadSettingsState)', () => {
     const state = await loadSettingsState()
 
     expect(state.features).toEqual(DEFAULT_FEATURE_TOGGLES)
+  })
+
+  it('hidrata o locale de STT de get_app_settings; valor fora do contrato cai no default', async () => {
+    offlineApp()
+    mockInvoke({
+      get_provider_statuses: { credentials: [] },
+      get_app_settings: { features: {}, sttLanguage: 'en-US' },
+    })
+    expect((await loadSettingsState()).sttLanguage).toBe('en-US')
+
+    mockInvoke({
+      get_provider_statuses: { credentials: [] },
+      get_app_settings: { features: {}, sttLanguage: 'es-ES' },
+    })
+    expect((await loadSettingsState()).sttLanguage).toBe(DEFAULT_STT_LANGUAGE)
+
+    mockInvoke({ get_provider_statuses: { credentials: [] } })
+    expect((await loadSettingsState()).sttLanguage).toBe(DEFAULT_STT_LANGUAGE)
+  })
+
+  it('hidrata o overlay customizado de get_app_settings; valor fora do contrato cai no default', async () => {
+    offlineApp()
+    mockInvoke({
+      get_provider_statuses: { credentials: [] },
+      get_app_settings: {
+        features: {},
+        overlayTemplateEnabled: true,
+        overlayTemplate: '<div data-ray-body>{{bodyHtml}}</div>',
+      },
+    })
+    const ligado = await loadSettingsState()
+    expect(ligado.overlayTemplateEnabled).toBe(true)
+    expect(ligado.overlayTemplate).toBe('<div data-ray-body>{{bodyHtml}}</div>')
+
+    // Leitura tolerante: flag não-booleano e template não-string caem nos
+    // defaults do contrato (desligado, vazio = built-in).
+    mockInvoke({
+      get_provider_statuses: { credentials: [] },
+      get_app_settings: { features: {}, overlayTemplateEnabled: 'sim', overlayTemplate: 42 },
+    })
+    const invalido = await loadSettingsState()
+    expect(invalido.overlayTemplateEnabled).toBe(false)
+    expect(invalido.overlayTemplate).toBe('')
+
+    // Sidecar fora: defaults.
+    mockInvoke({ get_provider_statuses: { credentials: [] } })
+    const ausente = await loadSettingsState()
+    expect(ausente.overlayTemplateEnabled).toBe(false)
+    expect(ausente.overlayTemplate).toBe('')
   })
 
   it('hidrata a versão real do app via getVersion()', async () => {

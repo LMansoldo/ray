@@ -3,13 +3,16 @@ import { render, cleanup, fireEvent } from '@testing-library/svelte'
 import AppBar from './AppBar.svelte'
 import type { AppBarProps } from './types'
 
-// Contrato T-401 / RF-010: barra flutuante compacta (150x80) com grip para
-// arrastar, grid 3x2 de botoes so-icone e a BOLA do stealth como indicador
-// de estado (laranja = ativo; apagada = inativo). Sem texto na barra.
+// Contrato T-401 / RF-010 (proposta estilo macOS aprovada em
+// ray-appbar-macos-mock.html): toolbar horizontal com traffic lights — o
+// vermelho é o "Ocultar" funcional (RF-504), amarelo/verde são decorativos —
+// segmented control de navegação (Home/Assistentes/Configurações, segmento
+// ativo destacado), chip do stealth com LED laranja (aceso = ativo) e botão
+// de onboarding. Sem grip de pontos: a barra inteira é drag region nativa.
 // RF-502: ativacao rapida do stealth com sinalizacao clara do estado.
 // RF-504: ocultar a janela main ("panic hide") via hide_window.
-// RF-508: o aviso de uso responsavel viaja NO TOOLTIP da bola do stealth
-// (a barra compacta nao tem texto visivel).
+// RF-508: o aviso de uso responsavel viaja NO TOOLTIP do chip do stealth
+// (a barra não tem texto de estado "ativo/inativo" visível).
 //
 // Navegacao cross-window: invoke('show_window', { windowLabel: 'main' }) +
 // emit('ray:navigate', { surface: dest }). Nao ha mais pub/sub in-process.
@@ -66,30 +69,32 @@ function stealthTooltip(container: HTMLElement): string {
   return stealthBall(container).getAttribute('title') ?? ''
 }
 
-describe('AppBar — elementos da barra flutuante (RF-010)', () => {
-  it('renderiza grip, Home, bola do stealth, Iniciar Configuracao e Ocultar', () => {
+describe('AppBar — elementos da barra estilo macOS (RF-010)', () => {
+  it('renderiza traffic lights, segmentos, chip do stealth, onboarding e Ocultar', () => {
     const { container, getByRole } = render(AppBar, { props: baseProps })
 
     expect(container.querySelector('[data-appbar]'), 'raiz da barra').not.toBeNull()
-    expect(container.querySelector('[data-appbar-grip]'), 'grip de arrastar').not.toBeNull()
-    expect(getByRole('button', { name: 'Home' }), 'botao Home').toBeDefined()
-    expect(getByRole('button', { name: 'Assistentes' }), 'botao Assistentes').toBeDefined()
-    expect(getByRole('button', { name: 'Configuracoes' }), 'botao Configuracoes').toBeDefined()
-    expect(container.querySelector('[data-appbar-stealth]'), 'bola do stealth').not.toBeNull()
+    expect(container.querySelector('[data-appbar-lights]'), 'traffic lights').not.toBeNull()
+    expect(getByRole('button', { name: 'Home' }), 'segmento Home').toBeDefined()
+    expect(getByRole('button', { name: 'Assistentes' }), 'segmento Assistentes').toBeDefined()
+    expect(getByRole('button', { name: 'Configuracoes' }), 'segmento Configuracoes').toBeDefined()
+    expect(container.querySelector('[data-appbar-stealth]'), 'chip do stealth').not.toBeNull()
     expect(getByRole('button', { name: 'Iniciar Configuracao' })).toBeDefined()
-    expect(getByRole('button', { name: 'Ocultar' }), 'botao de ocultar').toBeDefined()
+    expect(getByRole('button', { name: 'Ocultar' }), 'traffic light vermelho (Ocultar)').toBeDefined()
   })
 
-  it('a barra nao tem texto de status — so a bola indica o estado (barra 150x80)', () => {
+  it('amarelo e verde sao decorativos — so o vermelho e botao', () => {
+    const { container } = render(AppBar, { props: baseProps })
+    const lights = container.querySelector('[data-appbar-lights]')
+    expect(lights?.querySelectorAll('button')).toHaveLength(1)
+    expect(lights?.querySelectorAll('.appbar__light')).toHaveLength(3)
+  })
+
+  it('o estado do stealth aparece no LED e no tooltip, nao em texto de status', () => {
     const { container } = render(AppBar, { props: baseProps })
     expect(container.querySelector('[data-appbar-status]')).toBeNull()
     expect(container.textContent ?? '').not.toContain('Stealth ativo')
     expect(container.textContent ?? '').not.toContain('Stealth inativo')
-  })
-
-  it('o grip existe como indicador visual de arraste', () => {
-    const { container } = render(AppBar, { props: baseProps })
-    expect(container.querySelector('[data-appbar-grip]')).not.toBeNull()
   })
 
   it('a barra inteira e regiao de arraste nativa (data-tauri-drag-region)', () => {
@@ -98,14 +103,21 @@ describe('AppBar — elementos da barra flutuante (RF-010)', () => {
     expect(nav?.hasAttribute('data-tauri-drag-region')).toBe(true)
   })
 
-  it('comeca com stealth ativo (bola acesa) e o aviso RF-508 no tooltip', () => {
+  it('comeca com Home destacada e stealth ativo (LED aceso) com o aviso RF-508 no tooltip', () => {
     const { container } = render(AppBar, { props: baseProps })
+    expect(container.querySelector('.appbar__segment--on')?.getAttribute('aria-label')).toBe('Home')
     expect(stealthState(container)).toBe('true')
     const tooltip = stealthTooltip(container)
     for (const fragment of NOTICE_FRAGMENTS) {
       expect(tooltip).toMatch(fragment)
     }
     expect(invokeMock).not.toHaveBeenCalled()
+  })
+
+  it('clicar em um segmento move o destaque para ele', async () => {
+    const { container, getByRole } = render(AppBar, { props: baseProps })
+    await fireEvent.click(getByRole('button', { name: 'Assistentes' }))
+    expect(container.querySelector('.appbar__segment--on')?.getAttribute('aria-label')).toBe('Assistentes')
   })
 })
 
@@ -115,7 +127,7 @@ describe('AppBar — stealth alterna visivelmente (RF-502)', () => {
     await fireEvent.click(getByRole('button', { name: /stealth/i }))
 
     expect(invokeMock).toHaveBeenCalledTimes(1)
-    expect(invokeMock.mock.calls[0]).toEqual(['set_stealth', { windowLabel: 'main', excluded: false }])
+    expect(invokeMock.mock.calls[0]).toEqual(['set_stealth', { excluded: false }])
     expect(stealthState(container)).toBe('false')
     expect(stealthTooltip(container)).toMatch(/inativo/)
   })
@@ -130,8 +142,8 @@ describe('AppBar — stealth alterna visivelmente (RF-502)', () => {
     for (const fragment of NOTICE_FRAGMENTS) {
       expect(tooltip).toMatch(fragment)
     }
-    expect(invokeMock.mock.calls[0]).toEqual(['set_stealth', { windowLabel: 'main', excluded: false }])
-    expect(invokeMock.mock.calls[1]).toEqual(['set_stealth', { windowLabel: 'main', excluded: true }])
+    expect(invokeMock.mock.calls[0]).toEqual(['set_stealth', { excluded: false }])
+    expect(invokeMock.mock.calls[1]).toEqual(['set_stealth', { excluded: true }])
   })
 
   it('segundo clique reativa: set_stealth com excluded=true e a bola acende', async () => {
@@ -141,8 +153,8 @@ describe('AppBar — stealth alterna visivelmente (RF-502)', () => {
     await fireEvent.click(botao)
 
     expect(invokeMock).toHaveBeenCalledTimes(2)
-    expect(invokeMock.mock.calls[0]).toEqual(['set_stealth', { windowLabel: 'main', excluded: false }])
-    expect(invokeMock.mock.calls[1]).toEqual(['set_stealth', { windowLabel: 'main', excluded: true }])
+    expect(invokeMock.mock.calls[0]).toEqual(['set_stealth', { excluded: false }])
+    expect(invokeMock.mock.calls[1]).toEqual(['set_stealth', { excluded: true }])
     expect(stealthState(container)).toBe('true')
   })
 
@@ -155,7 +167,7 @@ describe('AppBar — stealth alterna visivelmente (RF-502)', () => {
     expect(invokeMock).not.toHaveBeenCalled()
 
     await fireEvent.click(getByRole('button', { name: /stealth/i }))
-    expect(invokeMock.mock.calls[0]).toEqual(['set_stealth', { windowLabel: 'main', excluded: true }])
+    expect(invokeMock.mock.calls[0]).toEqual(['set_stealth', { excluded: true }])
   })
 })
 
@@ -201,15 +213,12 @@ describe('AppBar — navegacao cross-window (RF-010)', () => {
     expect(emitMock).not.toHaveBeenCalled()
   })
 
-  it('windowLabel prop controla apenas o stealth, nao a navegacao', async () => {
-    const { getByRole } = render(AppBar, { props: { windowLabel: 'outra-janela' } })
+  it('stealth é GLOBAL: set_stealth sem windowLabel; navegação segue fixa na main', async () => {
+    const { getByRole } = render(AppBar)
     await fireEvent.click(getByRole('button', { name: /stealth/i }))
 
-    expect(invokeMock.mock.calls[0]).toEqual([
-      'set_stealth',
-      { windowLabel: 'outra-janela', excluded: false },
-    ])
-    invokeMock.mockClear()
+    // Modo global: o core aplica em TODAS as janelas (windows::STEALTH_WINDOWS).
+    expect(invokeMock.mock.calls[0]).toEqual(['set_stealth', { excluded: false }])
 
     await fireEvent.click(getByRole('button', { name: 'Home' }))
     expect(invokeMock).toHaveBeenCalledWith('show_window', { windowLabel: 'main' })

@@ -257,6 +257,41 @@ describe('Overlay — nunca o editor completo no streaming (ADR-011)', () => {
   })
 })
 
+describe('Overlay — template customizado (customTemplate)', () => {
+  const CUSTOM_TEMPLATE = '<div data-ray-overlay-status="{{status}}"><div data-ray-body>{{bodyHtml}}</div></div>'
+
+  it('customTemplate null (default) renderiza o InsightCard embutido, nunca o iframe', async () => {
+    const { container } = render(Overlay, { props: baseProps })
+
+    await emit({ type: 'start', suggestionId: 's-1', contextLabel: 'Reunião' })
+    await emit({ type: 'token', text: 'Olá' })
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-insight-card]')).not.toBeNull()
+    })
+    expect(container.querySelector('[data-custom-overlay-card]')).toBeNull()
+  })
+
+  it('customTemplate ativo renderiza o card customizado e NUNCA o InsightCard', async () => {
+    const { container } = render(Overlay, {
+      props: { ...baseProps, customTemplate: CUSTOM_TEMPLATE },
+    })
+
+    await emit({ type: 'start', suggestionId: 's-1', contextLabel: 'Reunião' })
+    await emit({ type: 'token', text: 'Olá' })
+
+    // O token em streaming reconstrói o srcdoc com trailing debounce —
+    // esperamos o conteúdo chegar (comportamento observável).
+    await waitFor(() => {
+      const srcdoc =
+        container.querySelector('[data-custom-overlay-card]')?.getAttribute('srcdoc') ?? ''
+      expect(srcdoc).toContain('data-ray-body')
+      expect(srcdoc).toContain('Olá')
+    })
+    expect(container.querySelector('[data-insight-card]')).toBeNull()
+  })
+})
+
 describe('Overlay — posição (RF-012 / RF-507, parte UI)', () => {
   it('renderiza na posição recebida por prop e responde à mudança dela', async () => {
     const { container, rerender } = render(Overlay, { props: baseProps })

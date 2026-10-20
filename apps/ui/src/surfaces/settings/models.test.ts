@@ -6,7 +6,11 @@ import { setSettingsStateFeed, resetSettingsStateFeed } from './settings-feed'
 import { onSettingsAction } from './settings-actions'
 import type { SettingsAction } from './settings-actions'
 import type { SettingsState } from './types'
-import { DEFAULT_FEATURE_TOGGLES, DEFAULT_SHORTCUTS } from '../../../../../contracts/settings'
+import {
+  DEFAULT_FEATURE_TOGGLES,
+  DEFAULT_SHORTCUTS,
+  DEFAULT_STT_LANGUAGE,
+} from '../../../../../contracts/settings'
 
 // Contrato T-406 / RF-301, RF-302, RF-303, RF-404 — aba Modelos: cada função
 // (Transcrição/Análise/Tradução) tem seleção de provedor/modelo independente,
@@ -74,6 +78,9 @@ function baseState(overrides: Partial<SettingsState> = {}): SettingsState {
     appVersion: '0.0.0',
     shortcuts: DEFAULT_SHORTCUTS,
     features: { ...DEFAULT_FEATURE_TOGGLES },
+    sttLanguage: DEFAULT_STT_LANGUAGE,
+    overlayTemplateEnabled: false,
+    overlayTemplate: '',
     ...overrides,
   }
 }

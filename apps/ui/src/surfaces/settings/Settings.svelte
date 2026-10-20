@@ -1,8 +1,9 @@
 <script lang="ts">
   // Superfície Configurações (T-406, RF-206/301..404/601..706/1001..1004):
-  // 7 abas — Fontes de IA (BYOK, quatro modos de conexão), Modelos (seleção
+  // 8 abas — Fontes de IA (BYOK, quatro modos de conexão), Modelos (seleção
   // por função), Áudio e Tela (medidores), Permissões (RF-103), Recursos
-  // (toggles do contrato), Atalhos (espelho das regras do núcleo) e Ajuda.
+  // (toggles do contrato), Overlay (template HTML+CSS customizado), Atalhos
+  // (espelho das regras do núcleo) e Ajuda.
   //
   // Sem props (padrão T-405 — evita o problema de tipagem de props do T-402).
   // O estado ENTRA pelo adaptador local settings-feed.ts (que hidrata dos
@@ -24,7 +25,9 @@
     DEFAULT_FEATURE_TOGGLES,
     DEFAULT_SHORTCUTS,
     FEATURE_TOGGLE_NAMES,
+    OVERLAY_TEMPLATE_MAX_LENGTH,
     SHORTCUT_COMMANDS,
+    STT_LANGUAGE_IDS,
   } from '../../../../../contracts/settings'
   import type {
     FeatureToggleName,
@@ -33,6 +36,7 @@
     ShortcutCommand,
     ShortcutMap,
     ShortcutModifier,
+    SttLanguage,
   } from '../../../../../contracts/settings'
   import type {
     AiFunction,
@@ -40,7 +44,12 @@
     ProviderKind,
   } from '../../../../../contracts/ipc'
   import { loadSettingsState, readSettingsState } from './settings-feed'
-  import { dispatchSettingsAction } from './settings-actions'
+  import { dispatchSettingsAction, saveOverlayTemplate } from './settings-actions'
+  import {
+    DEFAULT_OVERLAY_TEMPLATE,
+    SAMPLE_OVERLAY_DATA,
+    renderOverlayTemplate,
+  } from '../../lib/overlay-template'
   import type { SettingsAction } from './settings-actions'
   import { formatCombo, validateShortcutChange } from './shortcut-validation'
   import type { ShortcutValidationError } from './shortcut-validation'
@@ -59,6 +68,7 @@
     { id: 'audioScreen', title: 'Áudio e Tela' },
     { id: 'permissions', title: 'Permissões' },
     { id: 'features', title: 'Recursos' },
+    { id: 'overlay', title: 'Overlay' },
     { id: 'shortcuts', title: 'Atalhos' },
     { id: 'help', title: 'Ajuda' },
   ]
@@ -73,10 +83,16 @@
   let settingsState = $state<SettingsState>(readSettingsState())
   void loadSettingsState().then((s) => {
     settingsState = s
-    // Atalhos e recursos seguem o estado carregado (RF-601/700): a UI
-    // espelha o mapa ativo no SO e os toggles persistidos.
+    // Atalhos, recursos e locale de STT seguem o estado carregado
+    // (RF-601/700): a UI espelha o mapa ativo no SO, os toggles persistidos
+    // e o idioma de captação salvo.
     shortcuts = { ...s.shortcuts }
     featureToggles = { ...DEFAULT_FEATURE_TOGGLES, ...s.features }
+    sttLanguage = s.sttLanguage
+    // Overlay customizado segue o estado persistido (toggle + rascunho do
+    // template — a edição local continua livre até o usuário clicar Salvar).
+    overlayTemplateEnabled = s.overlayTemplateEnabled
+    overlayTemplateDraft = s.overlayTemplate
   })
 
   // Recarrega o status dos provedores quando uma credencial é salva/validada
@@ -601,6 +617,96 @@
     void emit('ray:features-changed', features).catch(console.error)
   }
 
+  // ── Idioma da captação (STT) — contracts/settings.ts SttLanguage ────────
+  // Locale EXPLÍCITO do SFSpeechRecognizer: sem isso o recognizer herda o
+  // locale do dispositivo e pt-BR não é transcrito num macOS em inglês.
+
+  const STT_LANGUAGE_LABELS: Record<SttLanguage, string> = {
+    'pt-BR': 'Português (Brasil)',
+    'en-US': 'English (US)',
+  }
+
+  // Semeado do feed e re-sincronizado quando loadSettingsState resolve
+  // (mesma intenção do mapa de features: semear UMA vez é o desejado).
+  // svelte-ignore state_referenced_locally
+  let sttLanguage = $state<SttLanguage>(settingsState.sttLanguage)
+
+  function changeSttLanguage(event: Event): void {
+    const select = event.currentTarget as HTMLSelectElement
+    const language = select.value as SttLanguage
+    if (language === sttLanguage) return
+    const previous = sttLanguage
+    sttLanguage = language
+    dispatchSettingsAction({ type: 'sttLanguageChange', language })
+    // Persiste no core — que espelha no motor de STT e descarta os engines
+    // vivos (efeito imediato). Falha de persistência reverte a escolha.
+    void invoke('save_stt_language', { language }).catch((err) => {
+      sttLanguage = previous
+      console.error(err)
+    })
+  }
+
+  // ── Overlay customizado (template HTML+CSS, sem JavaScript) ────────────
+  // O template vive numa textarea monoespaçada; o que o usuário vê no
+  // preview é EXATAMENTE o que o overlay real renderiza (mesmo
+  // renderOverlayTemplate + SAMPLE_OVERLAY_DATA). Salvar só acontece no
+  // clique (Restaurar padrão preenche a textarea sem persistir) e o comando
+  // core emite ray:overlay-template-changed — o overlay troca ao vivo.
+
+  // Semeado do feed e re-sincronizado quando loadSettingsState resolve
+  // (mesma intenção de features/atalhos: semear UMA vez é o desejado).
+  // svelte-ignore state_referenced_locally
+  let overlayTemplateEnabled = $state(settingsState.overlayTemplateEnabled)
+  // svelte-ignore state_referenced_locally
+  let overlayTemplateDraft = $state(settingsState.overlayTemplate)
+
+  /** Estouro do teto do contrato: a ação NÃO é chamada — erro inline. */
+  let overlayTemplateTooLong = $derived(
+    overlayTemplateDraft.length > OVERLAY_TEMPLATE_MAX_LENGTH,
+  )
+
+  let overlaySaving = $state(false)
+  let overlayFeedback = $state<{ kind: 'ok' | 'error'; message: string } | null>(null)
+
+  async function saveOverlayTemplateDraft(): Promise<void> {
+    // Validação de tamanho no cliente: sem invoke quando estoura (o erro
+    // já está exibido no painel).
+    if (overlayTemplateTooLong || overlaySaving) return
+    overlaySaving = true
+    overlayFeedback = null
+    const enabled = overlayTemplateEnabled
+    const template = overlayTemplateDraft
+    dispatchSettingsAction({ type: 'overlayTemplateChange', enabled, template })
+    try {
+      await saveOverlayTemplate(enabled, template)
+      overlayFeedback = { kind: 'ok', message: 'Template do overlay salvo — o overlay atualiza ao vivo.' }
+    } catch {
+      overlayFeedback = { kind: 'error', message: 'Não foi possível salvar — núcleo indisponível.' }
+    } finally {
+      overlaySaving = false
+    }
+  }
+
+  /** Preenche a textarea com o template default — só persiste no Salvar. */
+  function restoreOverlayTemplateDefault(): void {
+    overlayTemplateDraft = DEFAULT_OVERLAY_TEMPLATE
+    overlayFeedback = null
+  }
+
+  // Preview ao vivo (debounce leve): cada tecla reinicia o timer — o iframe
+  // só reconstrói quando o rascunho estabiliza. Textarea vazia = default
+  // (mesma regra do overlay real com template vazio).
+  let overlayPreviewHtml = $state('')
+
+  $effect(() => {
+    const source =
+      overlayTemplateDraft.trim() === '' ? DEFAULT_OVERLAY_TEMPLATE : overlayTemplateDraft
+    const timer = setTimeout(() => {
+      overlayPreviewHtml = renderOverlayTemplate(source, SAMPLE_OVERLAY_DATA)
+    }, 250)
+    return () => clearTimeout(timer)
+  })
+
   // ── Atalhos (RF-601/602/604) — estado do feed, espelho das regras core ──
 
   const SHORTCUT_LABELS: Record<ShortcutCommand, string> = {
@@ -1031,6 +1137,19 @@
         />
         Mostrar medidores de áudio
       </label>
+      <label class="settings__meter" data-stt-language-row>
+        Idioma da captação (reconhecimento de fala)
+        <select
+          class="settings__function-provider"
+          data-stt-language
+          value={sttLanguage}
+          onchange={changeSttLanguage}
+        >
+          {#each STT_LANGUAGE_IDS as id (id)}
+            <option value={id}>{STT_LANGUAGE_LABELS[id]}</option>
+          {/each}
+        </select>
+      </label>
     </section>
   {/if}
 
@@ -1072,6 +1191,83 @@
           {FEATURE_LABELS[name]}
         </label>
       {/each}
+    </section>
+  {/if}
+
+  {#if activeTab === 'overlay'}
+    <section class="settings__panel" data-settings-panel="overlay">
+      <label class="settings__feature" data-overlay-toggle-row>
+        <input
+          type="checkbox"
+          data-overlay-template-toggle
+          checked={overlayTemplateEnabled}
+          onclick={(event) => {
+            overlayTemplateEnabled = (event.currentTarget as HTMLInputElement).checked
+          }}
+        />
+        Overlay customizado (template próprio no lugar do card padrão)
+      </label>
+
+      <div class="settings__custom" data-overlay-template-editor>
+        <h3 class="settings__function-title">Template HTML + CSS (sem JavaScript)</h3>
+        <p class="settings__function-empty" data-overlay-template-hint>
+          Placeholders: {'{{contextLabel}}'}, {'{{theySaid}}'}, {'{{bodyHtml}}'} (HTML pronto do
+          markdown), {'{{status}}'} e {'{{error}}'}. Marque o corpo rolável com
+          <code>data-ray-body</code> — é o alvo da rolagem automática.
+        </p>
+        <textarea
+          class="overlay-template-input"
+          data-overlay-template-textarea
+          spellcheck="false"
+          bind:value={overlayTemplateDraft}
+        ></textarea>
+        <div class="key-row">
+          <button
+            type="button"
+            class="btn btn--primary"
+            data-overlay-template-save
+            disabled={overlaySaving}
+            onclick={() => void saveOverlayTemplateDraft()}
+          >
+            {overlaySaving ? 'Salvando…' : 'Salvar'}
+          </button>
+          <button
+            type="button"
+            class="btn btn--danger"
+            data-overlay-template-reset
+            onclick={restoreOverlayTemplateDefault}
+          >
+            Restaurar padrão
+          </button>
+        </div>
+        {#if overlayTemplateTooLong}
+          <p class="settings__shortcut-error" data-overlay-template-error>
+            Template acima do limite de {OVERLAY_TEMPLATE_MAX_LENGTH} caracteres — reduza antes de
+            salvar.
+          </p>
+        {:else if overlayFeedback !== null}
+          <p
+            class="settings__function-empty"
+            data-overlay-template-feedback={overlayFeedback.kind}
+          >
+            {overlayFeedback.message}
+          </p>
+        {/if}
+      </div>
+
+      <div class="settings__custom" data-overlay-template-preview-panel>
+        <h3 class="settings__function-title">Preview ao vivo</h3>
+        <p class="settings__function-empty">
+          Exemplo realista (com verificação de fatos) renderizado pelo mesmo caminho do overlay.
+        </p>
+        <iframe
+          class="overlay-template-preview"
+          data-overlay-template-preview
+          title="Preview do template do overlay"
+          sandbox="allow-same-origin"
+          srcdoc={overlayPreviewHtml}
+        ></iframe>
+      </div>
     </section>
   {/if}
 
@@ -1580,5 +1776,33 @@
   .settings__help-action,
   .settings__shortcut-reset {
     align-self: flex-start;
+  }
+
+  /* ── Overlay customizado (template HTML+CSS) ─────────────────────────── */
+  .overlay-template-input {
+    font-family: 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 1.2rem;
+    line-height: 1.5;
+    min-height: 24rem;
+    padding: 0.8rem 1rem;
+    color: var(--text-s);
+    background: rgba(255, 255, 255, 0.04);
+    border: 0.1rem solid var(--rim);
+    border-radius: 0.7rem;
+    outline: none;
+    resize: vertical;
+    white-space: pre;
+  }
+
+  .overlay-template-input:focus {
+    border-color: var(--iris);
+  }
+
+  .overlay-template-preview {
+    width: 100%;
+    height: 28rem;
+    border: 0.1rem solid var(--rim);
+    border-radius: 1rem;
+    background: rgba(0, 0, 0, 0.35);
   }
 </style>

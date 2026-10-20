@@ -8,6 +8,7 @@ import type { SettingsState } from './types'
 import {
   FEATURE_TOGGLE_NAMES,
   DEFAULT_FEATURE_TOGGLES,
+  DEFAULT_STT_LANGUAGE,
   DEFAULT_SHORTCUTS,
 } from '../../../../../contracts/settings'
 
@@ -66,6 +67,9 @@ function baseState(overrides: Partial<SettingsState> = {}): SettingsState {
     appVersion: '0.0.0',
     shortcuts: DEFAULT_SHORTCUTS,
     features: { ...DEFAULT_FEATURE_TOGGLES },
+    sttLanguage: DEFAULT_STT_LANGUAGE,
+    overlayTemplateEnabled: false,
+    overlayTemplate: '',
     ...overrides,
   }
 }

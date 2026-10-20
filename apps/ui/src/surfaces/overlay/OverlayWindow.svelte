@@ -36,6 +36,29 @@
   let meetingActive = $state(false)
   let hint = $state('')
   let autoScroll = $state(true)
+  // Template customizado do overlay (HTML+CSS do usuário). null = built-in
+  // (InsightCard): hidratado de get_app_settings no arranque (com tolerância —
+  // comando falhou = built-in) e mantido ao vivo via ray:overlay-template-changed.
+  let customTemplate = $state<string | null>(null)
+
+  // Type Safety (general.md): o blob de settings chega como unknown e é
+  // estreitado antes de virar template — campo ausente/inválido = built-in.
+  function resolveCustomTemplate(settings: unknown): string | null {
+    if (!settings || typeof settings !== 'object') return null
+    const blob = settings as Record<string, unknown>
+    if (blob.overlayTemplateEnabled !== true) return null
+    return typeof blob.overlayTemplate === 'string' && blob.overlayTemplate !== ''
+      ? blob.overlayTemplate
+      : null
+  }
+
+  function isOverlayTemplatePayload(
+    payload: unknown,
+  ): payload is { enabled: boolean; template: string } {
+    if (typeof payload !== 'object' || payload === null) return false
+    const record = payload as Record<string, unknown>
+    return typeof record.enabled === 'boolean' && typeof record.template === 'string'
+  }
 
   let hideTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -195,6 +218,27 @@
       }),
     )
 
+    // Template customizado: hidrata do banco (tolerância: comando falhou =
+    // built-in) e acompanha o evento global — salvar nas Configurações
+    // atualiza o overlay AO VIVO, sem reinício (save_overlay_template emite).
+    void invoke<unknown>('get_app_settings')
+      .then((settings) => {
+        customTemplate = resolveCustomTemplate(settings)
+      })
+      .catch(() => {
+        customTemplate = null
+      })
+    track(
+      listen<unknown>('ray:overlay-template-changed', (event) => {
+        const payload: unknown = event.payload
+        if (isOverlayTemplatePayload(payload) && payload.enabled && payload.template !== '') {
+          customTemplate = payload.template
+        } else {
+          customTemplate = null
+        }
+      }),
+    )
+
     // RF-507: mover a JANELA (não mais um transform in-page). RF-334:
     // previousResponse/nextResponse viram evento DOM consumido pelo <Overlay>
     // — e os atalhos de insight do NOTCH também navegam o overlay (o evento
@@ -256,7 +300,7 @@
   <div class="overlay-window__drag" data-overlay-drag-handle onpointerdown={startWindowDrag}>
     <span class="overlay-window__grip" aria-hidden="true"></span>
   </div>
-  <Overlay {meetingActive} {hint} {autoScroll} />
+  <Overlay {meetingActive} {hint} {autoScroll} {customTemplate} />
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="overlay-window__resize"
@@ -272,24 +316,30 @@
      O componente SEMPRE ocupa a largura e altura máximas da janela Tauri: o
      resize pertence ao container (bordas nativas + grip de canto) e o
      conteúdo responde a ele — o card estica para preencher e o DIGA ISSO
-     rola dentro do corpo. */
+     rola dentro do corpo. Sem padding: a borda do card termina EXATAMENTE na
+     extremidade da janela (sem sombra, não há vão para preencher). A alça de
+     arraste e a navegação de histórico ficam sobrepostas ao card. */
   .overlay-window {
     position: relative;
     width: 100vw;
     height: 100vh;
-    padding: 12px 16px;
+    padding: 0;
     display: flex;
     flex-direction: column;
     align-items: center;
     overflow: hidden;
   }
 
-  /* ── Alça de arraste (topo) ── */
+  /* ── Alça de arraste (sobre o card, no topo) ── */
   .overlay-window__drag {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 3;
     width: 100%;
     height: 1.6rem;
     flex-shrink: 0;
-    margin-bottom: 0.2rem;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -365,13 +415,31 @@
   }
 
   .overlay-window :global(.overlay__card-wrap) {
+    position: relative;
     flex: 1;
     min-height: 0;
+  }
+
+  /* Navegação de histórico sobreposta ao canto inferior do card (fora do
+     fluxo) — o card precisa ocupar a janela INTEIRA para a borda terminar na
+     extremidade do container. O offset à direita desvia do grip de resize. */
+  .overlay-window :global(.overlay__history) {
+    position: absolute;
+    right: 2.4rem;
+    bottom: 0.4rem;
+    z-index: 2;
   }
 
   .overlay-window :global(.insight-card) {
     width: 100%;
     max-width: 100%;
+    flex: 1;
+    min-height: 0;
+  }
+
+  /* O iframe do template customizado preenche como o InsightCard: a borda do
+     card vive DENTRO do template — o frame ocupa a janela inteira. */
+  .overlay-window :global([data-custom-overlay-card]) {
     flex: 1;
     min-height: 0;
   }

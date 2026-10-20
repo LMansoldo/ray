@@ -42,13 +42,13 @@ vi.mock('@tauri-apps/api/event', () => ({
 }))
 
 const SAMPLE: AssistantView[] = [
-  { id: 'a1', name: 'Generalista', category: 'GENERAL', prompt: 'Você é um assistente geral.' },
-  { id: 'a2', name: 'Reuniões executivas', category: 'MEETINGS', prompt: 'Resuma decisões e ações.' },
-  { id: 'a3', name: 'Resumo de vendas', category: 'SALES', prompt: 'Sugira perguntas para qualificar.' },
-  { id: 'a4', name: 'Tradução ao vivo', category: 'TRANSLATION', prompt: 'Traduza mantendo o tom.' },
-  { id: 'a5', name: 'Preparação de entrevista', category: 'INTERVIEW', prompt: 'Destaque pontos fortes.' },
-  { id: 'a6', name: 'Estudo dirigido', category: 'STUDY', prompt: 'Crie flashcards e resumos.' },
-  { id: 'a7', name: 'Custom de vendas', category: 'CUSTOM', prompt: 'Prompt personalizado.' },
+  { id: 'a1', name: 'Generalista', category: 'GENERAL', prompt: 'Você é um assistente geral.', source: 'USER' },
+  { id: 'a2', name: 'Reuniões executivas', category: 'MEETINGS', prompt: 'Resuma decisões e ações.', source: 'USER' },
+  { id: 'a3', name: 'Resumo de vendas', category: 'SALES', prompt: 'Sugira perguntas para qualificar.', source: 'USER' },
+  { id: 'a4', name: 'Tradução ao vivo', category: 'TRANSLATION', prompt: 'Traduza mantendo o tom.', source: 'USER' },
+  { id: 'a5', name: 'Preparação de entrevista', category: 'INTERVIEW', prompt: 'Destaque pontos fortes.', source: 'USER' },
+  { id: 'a6', name: 'Estudo dirigido', category: 'STUDY', prompt: 'Crie flashcards e resumos.', source: 'USER' },
+  { id: 'a7', name: 'Custom de vendas', category: 'CUSTOM', prompt: 'Prompt personalizado.', source: 'USER' },
 ]
 
 function makeAssistants(count: number): AssistantView[] {
@@ -59,6 +59,7 @@ function makeAssistants(count: number): AssistantView[] {
       name: `Assistente ${number}`,
       category: number % 2 === 0 ? 'MEETINGS' : 'SALES',
       prompt: `Prompt do Assistente ${number}`,
+      source: 'USER',
     }
   })
 }
@@ -447,5 +448,86 @@ describe('biblioteca — importação e criador (RF-336, RF-338)', () => {
     // NUNCA inventam invoke (contrato: só os comandos registrados no core).
     const commands = invokeMock.mock.calls.map((c) => c[0])
     expect(new Set(commands)).toEqual(new Set(['list_assistants']))
+  })
+})
+
+// ── Exclusão de assistentes USER (botão de trash) ────────────────────────
+
+function deleteButton(container: HTMLElement, id: string): HTMLButtonElement {
+  const button = container.querySelector<HTMLButtonElement>(`[data-assistant-delete="${id}"]`)
+  if (!button) {
+    throw new Error(`botão de excluir do assistente ${id} não encontrado`)
+  }
+  return button
+}
+
+describe('biblioteca — exclusão de assistentes USER (trash)', () => {
+  it('mostra o trash só em linhas USER — BUILTIN (seed) não é deletável', async () => {
+    const state: AssistantsState = {
+      assistants: [
+        { id: 'seed', name: 'Assistente Padrao', category: 'GENERAL', prompt: 'Seed.', source: 'BUILTIN' },
+        { id: 'u1', name: 'Meu assistente', category: 'CUSTOM', prompt: 'Prompt.', source: 'USER' },
+      ],
+      activeAssistantId: 'seed',
+    }
+    const { container } = renderLibrary(state)
+
+    expect(container.querySelector('[data-assistant-delete="seed"]')).toBeNull()
+    expect(deleteButton(container, 'u1')).toBeTruthy()
+  })
+
+  it('clique no trash invoca delete_assistant e remove a linha ao confirmar', async () => {
+    const state: AssistantsState = {
+      assistants: [
+        { id: 'seed', name: 'Assistente Padrao', category: 'GENERAL', prompt: 'Seed.', source: 'BUILTIN' },
+        { id: 'u1', name: 'Meu assistente', category: 'CUSTOM', prompt: 'Prompt.', source: 'USER' },
+      ],
+      activeAssistantId: 'seed',
+    }
+    const { container } = renderLibrary(state)
+
+    await fireEvent.click(deleteButton(container, 'u1'))
+
+    expect(invokeMock).toHaveBeenCalledWith('delete_assistant', { id: 'u1' })
+    expect(container.querySelector('[data-assistant-row="u1"]')).toBeNull()
+    expect(rowById(container, 'seed')).toBeTruthy()
+  })
+
+  it('excluir o ativo faz o primeiro restante assumir e emite ray:assistant-changed', async () => {
+    const state: AssistantsState = {
+      assistants: [
+        { id: 'seed', name: 'Assistente Padrao', category: 'GENERAL', prompt: 'Seed.', source: 'BUILTIN' },
+        { id: 'u1', name: 'Meu assistente', category: 'CUSTOM', prompt: 'Prompt.', source: 'USER' },
+      ],
+      activeAssistantId: 'u1',
+    }
+    const { container } = renderLibrary(state)
+
+    await fireEvent.click(deleteButton(container, 'u1'))
+
+    expect(rowById(container, 'seed').getAttribute('data-assistant-active')).toBe('true')
+    expect(emitMock).toHaveBeenCalledWith('ray:assistant-changed', {
+      id: 'seed',
+      name: 'Assistente Padrao',
+      category: 'GENERAL',
+    })
+  })
+
+  it('falha do core mantém a linha (nada é removido otimistamente sem confirmação)', async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'delete_assistant') throw new Error('sidecar not started')
+      return undefined
+    })
+    const state: AssistantsState = {
+      assistants: [
+        { id: 'u1', name: 'Meu assistente', category: 'CUSTOM', prompt: 'Prompt.', source: 'USER' },
+      ],
+      activeAssistantId: null,
+    }
+    const { container } = renderLibrary(state)
+
+    await fireEvent.click(deleteButton(container, 'u1'))
+
+    expect(rowById(container, 'u1')).toBeTruthy()
   })
 })

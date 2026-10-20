@@ -7,7 +7,11 @@ import type { SettingsAction } from './settings-actions'
 import type { SettingsState } from './types'
 import { onOnboardingRestart } from '../onboarding/restart'
 import { getVersion } from '@tauri-apps/api/app'
-import { DEFAULT_FEATURE_TOGGLES, DEFAULT_SHORTCUTS } from '../../../../../contracts/settings'
+import {
+  DEFAULT_FEATURE_TOGGLES,
+  DEFAULT_SHORTCUTS,
+  DEFAULT_STT_LANGUAGE,
+} from '../../../../../contracts/settings'
 
 // Contrato T-406 / RF-1001..1004 — aba Ajuda:
 //   RF-1001 Sobre com versão real do app: loadSettingsState hidrata via
@@ -53,6 +57,9 @@ function baseState(overrides: Partial<SettingsState> = {}): SettingsState {
     appVersion: '0.0.0',
     shortcuts: DEFAULT_SHORTCUTS,
     features: { ...DEFAULT_FEATURE_TOGGLES },
+    sttLanguage: DEFAULT_STT_LANGUAGE,
+    overlayTemplateEnabled: false,
+    overlayTemplate: '',
     ...overrides,
   }
 }

@@ -63,6 +63,73 @@
       window.removeEventListener('ray:overlay-scroll', handleOverlayScrollShortcut)
     }
   })
+
+  // ── Auto-ajuste da fonte do DIGA ISSO (por overflow, não por contagem de
+  // palavras): enquanto o conteúdo estoura o corpo rolável, a fonte desce
+  // degraus até caber ou até o piso de legibilidade. Manipulação direta no
+  // DOM (body.style.fontSize): ler scrollHeight logo após aplicar o estilo
+  // força reflow síncrono — sem rune $state (proibida neste arquivo, trap da
+  // prop `state`), sem rAF e sem oscilação.
+  const SAY_FONT_TIERS_REM = [1.33, 1.22, 1.11] as const
+  let sayFontTier = 0
+  let prevSuggestionId: string | null | undefined
+  let prevStatus: string | null | undefined
+
+  function applySayFontTier(tier: number): void {
+    const body = sayThisBody
+    if (body === null) return
+    sayFontTier = tier
+    body.style.fontSize = `${SAY_FONT_TIERS_REM[tier]}rem`
+  }
+
+  function sayFontOverflowed(body: HTMLElement): boolean {
+    return body.scrollHeight > body.clientHeight + 1
+  }
+
+  // growAllowed só em eventos discretos (resize da janela, resposta
+  // concluída): tenta subir um degrau medindo no tier maior e volta se
+  // estourar. Durante o streaming a fonte só encolhe — o texto cresce por
+  // token, então não há vaivém.
+  function fitSayFont(growAllowed: boolean): void {
+    const body = sayThisBody
+    if (body === null) return
+    let tier = sayFontTier
+    if (growAllowed && tier > 0) {
+      applySayFontTier(tier - 1)
+      if (sayFontOverflowed(body)) applySayFontTier(tier)
+      else tier -= 1
+    }
+    while (tier < SAY_FONT_TIERS_REM.length - 1 && sayFontOverflowed(body)) {
+      tier += 1
+      applySayFontTier(tier)
+    }
+  }
+
+  // Resposta nova → volta ao maior degrau; a cada token mede overflow e
+  // encolhe se precisar; ao concluir (streaming→done) tenta recuperar degraus.
+  $effect(() => {
+    state.suggestionId
+    state.status
+    state.text
+    if (state.suggestionId !== prevSuggestionId) {
+      prevSuggestionId = state.suggestionId
+      prevStatus = state.status
+      applySayFontTier(0)
+      return
+    }
+    const justDone = prevStatus !== 'done' && state.status === 'done'
+    prevStatus = state.status
+    fitSayFont(justDone)
+  })
+
+  // Janela redimensionada → re-medir permitindo crescer (evento discreto:
+  // a tentativa de subir degrau já mede e volta no mesmo tick).
+  $effect(() => {
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => fitSayFont(true))
+    if (sayThisBody !== null) observer.observe(sayThisBody)
+    return () => observer.disconnect()
+  })
 </script>
 
 <article
@@ -72,7 +139,6 @@
   style:--surface-fill={glassTokens.color.surface}
   style:--surface-border={glassTokens.color.border}
   style:--surface-content={glassTokens.color.content}
-  style:--surface-shadow={glassTokens.shadow.background}
   style:--surface-blur={glassTokens.blur.surface}
 >
   <header class="insight-card__context" data-insight-context>
@@ -109,7 +175,7 @@
       bind:this={sayThisBody}
       onscroll={handleScroll}
     >
-      <MarkdownView markdown={state.text} />{#if state.status === 'streaming'}<span
+      <MarkdownView markdown={state.text} settled={state.status === 'done'} />{#if state.status === 'streaming'}<span
           class="cursor"
           aria-hidden="true"
         ></span>{/if}
@@ -130,15 +196,14 @@
     gap: 1.4rem;
     width: 42rem;
     max-width: 100%;
-    padding: 1.8rem;
+    padding: 1.44rem;
     color: var(--surface-content, var(--text-p));
     background: var(--surface-fill, rgba(20, 22, 36, 0.93));
     border: 0.1rem solid var(--surface-border, rgba(255, 255, 255, 0.13));
     border-radius: 1.4rem;
-    box-shadow:
-      var(--surface-shadow, 0 2rem 6rem rgba(0, 0, 0, 0.55)),
-      0 0.2rem 0.8rem rgba(0, 0, 0, 0.35),
-      inset 0 1px 0 rgba(255, 255, 255, 0.07);
+    /* Sem sombra externa: a borda do card é o limite visual da janela —
+       qualquer sombra vazaria pela área transparente do container. */
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07);
     position: relative;
     overflow: hidden;
     backdrop-filter: blur(var(--surface-blur));
@@ -176,7 +241,7 @@
   }
 
   .insight-card__context-label {
-    font-size: 1.2rem;
+    font-size: 1.235rem;
     color: var(--text-s);
     font-weight: 500;
   }
@@ -189,7 +254,7 @@
 
   .insight-card__heading {
     margin: 0;
-    font-size: 1rem;
+    font-size: 1.045rem;
     font-weight: 700;
     letter-spacing: 0.09em;
     text-transform: uppercase;
@@ -198,19 +263,20 @@
 
   .insight-card__quote {
     margin: 0;
-    font-size: 1.3rem;
+    font-size: 1.52rem;
     font-style: italic;
     color: var(--text-s);
-    line-height: 1.55;
+    line-height: 1.5;
   }
 
   .insight-card__body {
-    max-height: 18rem;
+    max-height: 24rem;
     overflow-y: auto;
     padding-right: 0.4rem;
-    /* ~10px (1rem = 10px): o texto do agente (inclusive código) precisa ser
-       compacto dentro da janela flutuante. */
-    font-size: 1rem;
+    /* Tier 0 do auto-ajuste (SAY_FONT_TIERS_REM): ~13px (1rem = 10px) —
+       legibilidade em primeiro lugar; o overflow do conteúdo desce o degrau
+       via body.style.fontSize, nunca abaixo do piso (1.11rem). */
+    font-size: 1.33rem;
     line-height: 1.6;
     color: var(--text-p);
     min-width: 0;
@@ -221,7 +287,8 @@
   .cursor {
     display: inline-block;
     width: 2px;
-    height: 1.2rem;
+    /* 1em: acompanha o degrau atual do auto-ajuste da fonte do corpo. */
+    height: 1em;
     background: var(--iris);
     vertical-align: text-bottom;
     margin-left: 1px;
@@ -247,7 +314,7 @@
   .insight-card__error {
     margin: 0;
     padding: 0.8rem 1rem;
-    font-size: 1.2rem;
+    font-size: 1.235rem;
     color: var(--error);
     border: 0.1rem solid var(--rim);
     border-radius: 0.8rem;

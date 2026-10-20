@@ -11,6 +11,7 @@
   import { invoke } from '@tauri-apps/api/core'
   import type { SuggestStreamEvent } from '../../../../../contracts/ipc'
   import InsightCard from './InsightCard.svelte'
+  import CustomOverlayCard from './CustomOverlayCard.svelte'
   import { INITIAL_SUGGESTION_STREAM, reduceStreamEvent } from './stream'
   import { reduceInsightHistory, type InsightHistoryEntry } from '../notch/history'
   import type { OverlayProps } from './types'
@@ -20,6 +21,7 @@
     meetingActive = false,
     hint = '',
     autoScroll = true,
+    customTemplate = null,
   }: OverlayProps = $props()
 
   let stopping = $state(false)
@@ -146,7 +148,13 @@
     {@const cardState = viewOffset === 0 ? streamState : displayState}
     {#if cardState.status !== 'idle'}
       <div class="overlay__card-wrap">
-        <InsightCard state={cardState} {autoScroll} />
+        <!-- Template customizado do usuário (HTML+CSS em iframe sandbox)
+             quando ativo; o InsightCard embutido é o default intocado. -->
+        {#if customTemplate}
+          <CustomOverlayCard state={cardState} {autoScroll} template={customTemplate} />
+        {:else}
+          <InsightCard state={cardState} {autoScroll} />
+        {/if}
         {#if history.length > 0}
           <nav class="overlay__history" aria-label="Histórico de respostas" data-overlay-history>
             <button
@@ -246,7 +254,7 @@
   }
 
   .overlay__history-count {
-    font-size: 1.1rem;
+    font-size: 1.14rem;
     color: var(--text-t);
     font-variant-numeric: tabular-nums;
     padding: 0 4px;
@@ -254,9 +262,9 @@
 
   .overlay__stop {
     font: inherit;
-    font-size: 1.2rem;
+    font-size: 1.33rem;
     font-weight: 600;
-    padding: 0.6rem 1.2rem;
+    padding: 0.7rem 1.4rem;
     color: #fff;
     background: rgba(255, 69, 58, 0.85);
     border: none;
@@ -270,8 +278,8 @@
 
   .overlay__hint {
     max-width: 40rem;
-    padding: 0.6rem 1rem;
-    font-size: 1.2rem;
+    padding: 0.7rem 1.2rem;
+    font-size: 1.33rem;
     color: #f5e9c8;
     background: rgba(60, 50, 20, 0.85);
     border-radius: 0.9rem;

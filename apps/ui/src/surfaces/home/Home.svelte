@@ -50,6 +50,12 @@
   let sessionDetail = $state<SessionDetailData | null>(null)
   let sessionDetailError = $state('')
 
+  // ── Export de relatório da sessão (T-604): md ou html via comando core ──
+  type SessionReportData = { sessionId: string; format: string; filename: string; content: string }
+  let exporting = $state(false)
+  let exportFeedback = $state('')
+  let exportError = $state('')
+
   let unlistenTranscript: (() => void) | undefined
   let unlistenMeetingStart: (() => void) | undefined
   let unlistenMeetingStop: (() => void) | undefined
@@ -185,6 +191,49 @@
 
   function closeSession(): void {
     sessionDetail = null
+    exportFeedback = ''
+    exportError = ''
+  }
+
+  // Entrega do arquivo (T-604): sem plugin de dialog/fs configurado no Tauri,
+  // o caminho é o fallback de download via blob URL no webview. Se a criação
+  // do blob falhar (webview sem suporte a download), copia para a área de
+  // transferência como último recurso.
+  function deliverReport(report: SessionReportData): string {
+    try {
+      const mime =
+        report.format === 'html' ? 'text/html;charset=utf-8' : 'text/markdown;charset=utf-8'
+      const url = URL.createObjectURL(new Blob([report.content], { type: mime }))
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = report.filename
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 1_000)
+      return `Relatório exportado: ${report.filename}`
+    } catch {
+      void navigator.clipboard.writeText(report.content)
+      return 'Download indisponível — relatório copiado para a área de transferência'
+    }
+  }
+
+  async function exportSession(format: 'md' | 'html'): Promise<void> {
+    if (!sessionDetail || exporting) return
+    exporting = true
+    exportFeedback = ''
+    exportError = ''
+    try {
+      const report = await invoke<SessionReportData>('export_session_report', {
+        sessionId: sessionDetail.id,
+        format,
+      })
+      exportFeedback = deliverReport(report)
+    } catch (err) {
+      exportError = `Falha ao exportar: ${String(err)}`
+    } finally {
+      exporting = false
+    }
   }
 
   function openSettings(): void {
@@ -217,6 +266,27 @@
         <h2 class="home__session-detail-title">
           Sessão de {new Date(sessionDetail.startedAt).toLocaleString('pt-BR')}
         </h2>
+        <div class="home__session-export" data-session-export>
+          <span class="home__session-export-label">Exportar:</span>
+          <button
+            type="button"
+            class="home__nav-button"
+            data-export-report="md"
+            disabled={exporting}
+            onclick={() => void exportSession('md')}
+          >
+            Markdown
+          </button>
+          <button
+            type="button"
+            class="home__nav-button"
+            data-export-report="html"
+            disabled={exporting}
+            onclick={() => void exportSession('html')}
+          >
+            HTML
+          </button>
+        </div>
         <button
           type="button"
           class="home__nav-button"
@@ -226,6 +296,14 @@
           Voltar
         </button>
       </header>
+      {#if exportFeedback}
+        <p class="home__export-feedback" data-export-feedback role="status">
+          {exportFeedback}
+        </p>
+      {/if}
+      {#if exportError}
+        <p class="home__meeting-error" data-export-error role="alert">{exportError}</p>
+      {/if}
       {#if sessionDetail.assistantName}
         <p class="home__session-detail-assistant">Assistente: {sessionDetail.assistantName}</p>
       {/if}
@@ -457,6 +535,23 @@
     display: flex;
     align-items: center;
     gap: 1.2rem;
+  }
+
+  .home__session-export {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+
+  .home__session-export-label {
+    font-size: 1.1rem;
+    color: var(--text-t);
+  }
+
+  .home__export-feedback {
+    margin: 0;
+    font-size: 1.2rem;
+    color: var(--green);
   }
 
   .home__session-detail-title {

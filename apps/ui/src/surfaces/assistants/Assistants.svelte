@@ -108,6 +108,7 @@
           name: a.name,
           category: a.category as AssistantCategory,
           prompt: '',
+          source: a.source === 'BUILTIN' ? 'BUILTIN' : 'USER',
         }))
         if (active && res.assistants.some((a) => a.id === active)) {
           seededActiveId = active
@@ -231,6 +232,38 @@
     }
   }
 
+  /**
+   * Exclui um assistente USER (RF-336). Otimista: remove da lista quando o
+   * core confirma. Se o excluído era o ativo, o seed BUILTIN assume
+   * (primeiro da lista — createdAt asc) e o ativo atravessa o barramento
+   * para o Home/copiloto não ficar preso num id inexistente.
+   */
+  async function deleteAssistant(id: string): Promise<void> {
+    dispatchAssistantAction({ type: 'assistantDelete', assistantId: id })
+    try {
+      await invoke('delete_assistant', { id })
+    } catch (err) {
+      console.error('[delete_assistant]', err)
+      return
+    }
+    assistants = assistants.filter((assistant) => assistant.id !== id)
+    if (activeAssistantId === id) {
+      const fallback = assistants[0] ?? null
+      activeOverride = fallback?.id ?? null
+      if (fallback) {
+        safeSet(ACTIVE_ASSISTANT_KEY, fallback.id)
+        void emit(ASSISTANT_CHANGED_EVENT, {
+          id: fallback.id,
+          name: fallback.name,
+          category: fallback.category,
+        }).catch(console.error)
+      }
+    }
+    // A página corrente pode ter ficado vazia após a exclusão.
+    const totalPagesAfter = Math.max(1, Math.ceil(filtered.length / ASSISTANTS_PAGE_SIZE))
+    if (page > totalPagesAfter) page = totalPagesAfter
+  }
+
   async function createAssistant(): Promise<void> {
     if (creatorName === '') return
     const prompt = editorHandle?.getMarkdown() ?? ''
@@ -250,11 +283,11 @@
         category,
         prompt,
       })
-      newAssistant = { id: res.assistantId, name, category, prompt }
+      newAssistant = { id: res.assistantId, name, category, prompt, source: 'USER' }
     } catch (err) {
       console.error('[create_assistant]', err)
       // Fallback otimista local (sem persistência) — mesmo comportamento antigo.
-      newAssistant = { id: `local-${Date.now()}`, name, category, prompt }
+      newAssistant = { id: `local-${Date.now()}`, name, category, prompt, source: 'USER' }
     } finally {
       creatingAssistant = false
     }
@@ -325,37 +358,59 @@
         {:else}
           <div class="assistants__list">
             {#each pagination.items as assistant (assistant.id)}
-              <button
-                class="arow"
-                type="button"
-                data-assistant-row={assistant.id}
-                data-assistant-active={activeAssistantId === assistant.id ? 'true' : undefined}
-                onclick={() => selectAssistant(assistant.id)}
-              >
-                <span class="avatar" aria-hidden="true">{assistant.name.charAt(0).toUpperCase()}</span>
-                <span class="ainfo">
-                  <strong class="aname" data-assistant-name>{assistant.name}</strong>
-                  <span class="acat" data-assistant-category>
-                    {ASSISTANT_CATEGORY_LABELS[assistant.category]}
+              <div class="aentry">
+                <button
+                  class="arow"
+                  type="button"
+                  data-assistant-row={assistant.id}
+                  data-assistant-active={activeAssistantId === assistant.id ? 'true' : undefined}
+                  onclick={() => selectAssistant(assistant.id)}
+                >
+                  <span class="avatar" aria-hidden="true">{assistant.name.charAt(0).toUpperCase()}</span>
+                  <span class="ainfo">
+                    <strong class="aname" data-assistant-name>{assistant.name}</strong>
+                    <span class="acat" data-assistant-category>
+                      {ASSISTANT_CATEGORY_LABELS[assistant.category]}
+                    </span>
                   </span>
-                </span>
-                <span class="aprompt" data-assistant-prompt>
-                  {assistant.prompt}
-                </span>
-                {#if activeAssistantId === assistant.id}
-                  <span class="acheck" aria-hidden="true">
-                    <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
+                  <span class="aprompt" data-assistant-prompt>
+                    {assistant.prompt}
+                  </span>
+                  {#if activeAssistantId === assistant.id}
+                    <span class="acheck" aria-hidden="true">
+                      <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
+                        <path
+                          d="M2 6l3 3 5-5"
+                          stroke="white"
+                          stroke-width="1.8"
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                        />
+                      </svg>
+                    </span>
+                  {/if}
+                </button>
+                {#if assistant.source === 'USER'}
+                  <button
+                    class="adelete"
+                    type="button"
+                    data-assistant-delete={assistant.id}
+                    aria-label={`Excluir assistente ${assistant.name}`}
+                    title={`Excluir "${assistant.name}"`}
+                    onclick={() => void deleteAssistant(assistant.id)}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                       <path
-                        d="M2 6l3 3 5-5"
-                        stroke="white"
+                        d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"
+                        stroke="currentColor"
                         stroke-width="1.8"
                         stroke-linecap="round"
                         stroke-linejoin="round"
                       />
                     </svg>
-                  </span>
+                  </button>
                 {/if}
-              </button>
+              </div>
             {/each}
           </div>
         {/if}
@@ -519,6 +574,53 @@
     display: flex;
     flex-direction: column;
     gap: 1px;
+  }
+
+  /* ── Entrada da lista: linha selecionável + trash (assistentes USER) ── */
+  .aentry {
+    display: flex;
+    align-items: stretch;
+  }
+
+  .aentry .arow {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .adelete {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    align-self: center;
+    width: 2.2rem;
+    height: 2.2rem;
+    margin-left: 0.4rem;
+    flex-shrink: 0;
+    color: var(--text-t);
+    background: transparent;
+    border: 0.1rem solid transparent;
+    border-radius: 0.7rem;
+    cursor: pointer;
+    opacity: 0;
+    transition:
+      background 0.12s,
+      color 0.12s,
+      opacity 0.12s;
+  }
+
+  .aentry:hover .adelete,
+  .adelete:focus-visible {
+    opacity: 1;
+  }
+
+  .adelete:hover {
+    color: #ff6b6b;
+    background: rgba(255, 107, 107, 0.08);
+    border-color: rgba(255, 107, 107, 0.2);
+  }
+
+  .adelete:focus-visible {
+    outline: 2px solid var(--iris);
   }
 
   /* ── Linha de assistente (mock: .arow) ── */

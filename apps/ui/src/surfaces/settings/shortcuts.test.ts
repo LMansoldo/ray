@@ -9,6 +9,7 @@ import {
   SHORTCUT_COMMANDS,
   DEFAULT_SHORTCUTS,
   DEFAULT_FEATURE_TOGGLES,
+  DEFAULT_STT_LANGUAGE,
 } from '../../../../../contracts/settings'
 import type { ShortcutBinding, ShortcutMap } from '../../../../../contracts/settings'
 import { formatCombo } from './shortcut-validation'
@@ -88,6 +89,9 @@ function baseState(overrides: Partial<SettingsState> = {}): SettingsState {
     appVersion: '0.0.0',
     shortcuts: DEFAULT_SHORTCUTS,
     features: { ...DEFAULT_FEATURE_TOGGLES },
+    sttLanguage: DEFAULT_STT_LANGUAGE,
+    overlayTemplateEnabled: false,
+    overlayTemplate: '',
     ...overrides,
   }
 }
