@@ -23,7 +23,8 @@
         "alwaysOnTop": true,
         "resizable": false,
         "visible": true,
-        "center": true
+        "center": true,
+        "shadow": false
       },
       {
         "label": "main",
