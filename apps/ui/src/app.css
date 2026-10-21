@@ -79,6 +79,13 @@ body[data-surface='overlay'] {
   background: transparent;
 }
 
+/* Appbar: pílula arredondada flutuando sobre o desktop. Sem esta exceção o
+   body pinta o fundo escuro da janela inteira (600x56) e o retângulo aparece
+   atrás da barra como um "quadrado com borda" nos cantos do radius. */
+body[data-surface='appbar'] {
+  background: transparent;
+}
+
 /* ── Foco visível consistente (acessibilidade premium) ─────────────────── */
 
 :focus-visible {
