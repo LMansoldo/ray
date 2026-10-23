@@ -1,0 +1,3 @@
+[submodule "apps/facts"]
+	path = apps/facts
+	url = https://github.com/LMansoldo/ray-facts.git
